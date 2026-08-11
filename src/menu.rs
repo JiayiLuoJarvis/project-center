@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
+use dialoguer::{Confirm, FuzzySelect, Input, Select, theme::ColorfulTheme};
 
 use crate::launcher::{self, LauncherKind, ToolKind};
 use crate::models::{Project, ProjectData, is_linux_path, normalize, win_path_to_linux};
@@ -59,7 +59,7 @@ pub fn run(data: &mut ProjectData) -> Result<()> {
         let group_count = labels.len();
         labels.push("新增分组".into());
         labels.push("退出".into());
-        let Some(index) = Select::with_theme(&theme)
+        let Some(index) = FuzzySelect::with_theme(&theme)
             .with_prompt("选择项目分组")
             .items(&labels)
             .default(0)
@@ -101,7 +101,7 @@ fn project_menu(
         labels.push("新增项目".into());
         labels.push("管理本分组".into());
         labels.push("返回分组列表".into());
-        let Some(index) = Select::with_theme(theme)
+        let Some(index) = FuzzySelect::with_theme(theme)
             .with_prompt(format!("{}：选择项目", group_name))
             .items(&labels)
             .default(0)

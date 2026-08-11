@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.5.45", features = ["derive"] }
-dialoguer = "0.11.0"
+dialoguer = { version = "0.11.0", features = ["fuzzy-select"] }
 rfd = { version = "0.17.2", default-features = false, features = ["pollster"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
