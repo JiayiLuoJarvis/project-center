@@ -4,22 +4,23 @@
 
 ## Verify
 
-- `cargo test` runs the inline unit tests in `models.rs`, `ops.rs`, and `store.rs`; use `cargo test <filter>` for a focused test.
+- `cargo test` runs inline unit tests in `src/main.rs`, `src/launcher.rs`, `src/models.rs`, `src/ops.rs`, and `src/store.rs`; use `cargo test <filter>` for a focused test.
 - `cargo fmt --check`
 - `cargo clippy --all-targets -- -D warnings`
-- `cargo build --release` produces `target\release\pcs.exe` with LTO and stripping enabled.
-- The repository has no integration-test or CI configuration. `docs/spec.md` is the feature reference, but code is authoritative if they differ.
+- `cargo build --release` produces `target\release\pcs.exe` with LTO and stripping (see `[profile.release]`).
+- No integration tests or CI. `docs/spec.md` is the feature reference, but code is authoritative if they differ (spec §7's "发起后即退出" is stale: the launcher now blocks on console children).
 
 ## Runtime
 
-- `pcs` and `pcs menu` require a real Windows Terminal/conhost because `dialoguer` is interactive; commands such as `cargo run -- ls`, `cargo run -- path <name>`, and `cargo run -- wsl <name>` are scriptable.
-- Launching uses installed `wsl.exe`, `powershell.exe`, and `cmd /c code`; WSL and PowerShell run in the current console, while VS Code is spawned quietly.
-- Folder selection uses a native Windows `rfd` dialog. Avoid invoking dialog-based commands in non-interactive verification.
+- `pcs` / `pcs menu` and `pcs open <name>` without `-w|-p|-c` are interactive `dialoguer` menus requiring a real Windows Terminal/conhost.
+- Dialog-free, scriptable commands: `ls`, `path`, `wslpath`, `group ...`, `add`/`edit`/`rm`/`mv` given explicit paths, and `open`/`wsl`/`ps`/`code` with an explicit flag. `add` opens the native `rfd` folder picker only when neither `--dir` nor `--wsl-path` is given. Avoid dialog-based commands in non-interactive verification.
+- Launching uses installed `wsl.exe`, `powershell.exe`, and `cmd /c code` / `cmd /c cursor`. WSL/PowerShell run in the current console and the launcher waits for the child to exit while suppressing Ctrl+C (`SetConsoleCtrlHandler`); do not revert this to spawn-and-return. VS Code/Cursor spawn quietly.
 - The usual deployment target is `E:\dev_tool\pcs\pcs.exe`; copy the release binary there only when deployment is requested.
 
 ## Data Contracts
 
 - Runtime data is `%APPDATA%\project_center\projects.json`, falling back to `%USERPROFILE%\.project_center\projects.json` (or `HOME` if neither is available). CLI/menu mutations affect this real file; tests use `load_from`/`save_to` with temporary paths.
+- Every project has a UUID `id`. Any `<name>` argument also accepts `@<id>` (case-insensitive, unique prefix allowed); ids survive renames, and `Store::load` backfills missing ids on legacy data and writes back immediately. A project name starting with `@` is unreachable by name.
 - Keep the legacy JSON schema: the WSL field is `wslPath` (`#[serde(rename = "wslPath")]`) and optional fields use `#[serde(default)]`.
 - `Store::load` treats missing or corrupt JSON as empty data. `Store::save_to` must retain its atomic sequence: write `.json.tmp`, remove the old file, then rename.
 - Project and group lookup is case-insensitive. A project name found in multiple groups requires `--group`; do not silently choose a match.
@@ -27,13 +28,13 @@
 ## Path Semantics
 
 - `Project::linux_path()` prefers a non-empty manual `wsl_path`; otherwise Linux paths are normalized and Windows paths convert to `/mnt/<drive>/...`.
-- Linux-only projects have no usable Windows path, so PowerShell and VS Code must remain unavailable for them. Keep path behavior covered by `models.rs` tests.
+- Linux-only projects have an empty `path` and no usable Windows path, so PowerShell and VS Code must remain unavailable for them (`has_windows_path()`). Keep path behavior covered by `models.rs` tests.
 
 ## Module Boundaries
 
 - `src/main.rs`: clap definitions and CLI dispatch.
-- `src/menu.rs`: short-lived interactive CRUD, launcher choice, confirmation, and menu saves.
-- `src/ops.rs`: pure CRUD and unambiguous name lookup.
+- `src/menu.rs`: interactive CRUD, two-level launch choice (environment → tool: opencode/cursor-agent/terminal/vscode/cursor), confirmation, and menu saves.
+- `src/ops.rs`: pure CRUD and unambiguous name/id lookup.
 - `src/models.rs`: data model, legacy serialization, and path conversion.
-- `src/store.rs`: JSON loading and atomic persistence.
-- `src/launcher.rs`: WSL, PowerShell, and VS Code process launching.
+- `src/store.rs`: JSON loading, id backfill, and atomic persistence.
+- `src/launcher.rs`: WSL, PowerShell, and VS Code/Cursor process launching.

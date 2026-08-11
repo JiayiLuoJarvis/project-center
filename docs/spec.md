@@ -31,7 +31,7 @@ src/
 ├── ops.rs        # 项目与分组的纯数据操作、同名解析
 ├── models.rs     # 数据模型、JSON 序列化、路径互转
 ├── store.rs      # JSON 读取与原子写入
-└── launcher.rs   # WSL、PowerShell、opencode、cursor-agent、VS Code、Cursor 启动
+└── launcher.rs   # WSL、PowerShell、opencode、cursor-agent、VS Code、Cursor、资源管理器启动
 ```
 
 ## 4. 数据与路径
@@ -71,7 +71,7 @@ pcs group rm <分组> [--force]
 2. 进入分组后选择项目，也可以新增项目或管理当前分组。新增项目可选择 Windows 路径，或只输入 WSL 路径。
 3. 选择项目后可打开、编辑、删除、移动或返回项目列表。
 4. 编辑项目时各字段默认填充当前值，直接回车即可保留。
-5. 打开项目时先选择启动环境（WSL / PowerShell / IDE 启动，仅展示当前项目可用的环境），再选择具体工具，全程无启动确认。
+5. 打开项目时先选择启动环境（WSL / PowerShell / IDE 启动 / 文件夹，仅展示当前项目可用的环境），再选择具体工具（文件夹无二级工具，直接打开），全程无启动确认。
 6. 启动成功后退出菜单；取消任一级选择则回到项目操作菜单。
 
 菜单内的增删改操作会立即保存到 JSON 文件。仅 WSL 项目保存为空的 `path` 和独立的 `wslPath`，因此只显示 WSL 环境。
@@ -90,6 +90,7 @@ pcs group rm <分组> [--force]
 | PowerShell | cursor-agent | 当前控制台运行 `powershell.exe -NoExit -Command "Set-Location -LiteralPath '<winPath>'; cursor-agent"`，立即返回 |
 | IDE 启动 | VS Code | 后台运行 `cmd /c code <winPath>`，不创建新控制台 |
 | IDE 启动 | Cursor | 后台运行 `cmd /c cursor <winPath>`，不创建新控制台 |
+| 文件夹 | — | 后台运行 `explorer.exe <winPath>`，不创建新控制台 |
 
 WSL 和 PowerShell 环境继承当前控制台的输入输出，不创建 Windows Terminal 新标签页或新控制台。启动全程无「启动 X？(Y/n)」确认。
 

@@ -9,7 +9,11 @@ use crate::store::Store;
 pub fn choose_launcher(project: &Project) -> Result<Option<LauncherKind>> {
     let mut choices = vec![LauncherKind::Wsl];
     if project.has_windows_path() {
-        choices.extend([LauncherKind::PowerShell, LauncherKind::VsCode]);
+        choices.extend([
+            LauncherKind::PowerShell,
+            LauncherKind::VsCode,
+            LauncherKind::Explorer,
+        ]);
     }
     let labels: Vec<&str> = choices.iter().map(|kind| kind.label()).collect();
     let Some(index) = Select::with_theme(&ColorfulTheme::default())
@@ -34,6 +38,7 @@ fn choose_tool(kind: LauncherKind, theme: &ColorfulTheme) -> Result<Option<ToolK
             ]
         }
         LauncherKind::VsCode => vec![ToolKind::Vscode, ToolKind::Cursor],
+        LauncherKind::Explorer => return Ok(Some(ToolKind::Explorer)),
     };
     let labels: Vec<&str> = tools.iter().map(|tool| tool.label()).collect();
     let Some(index) = Select::with_theme(theme)
@@ -372,8 +377,10 @@ fn save(data: &ProjectData) -> Result<()> {
 }
 
 pub fn launch_direct(project: &Project, group_name: &str, kind: LauncherKind) -> Result<()> {
-    if matches!(kind, LauncherKind::PowerShell | LauncherKind::VsCode)
-        && !project.has_windows_path()
+    if matches!(
+        kind,
+        LauncherKind::PowerShell | LauncherKind::VsCode | LauncherKind::Explorer
+    ) && !project.has_windows_path()
     {
         bail!(
             "项目 `{}` 没有 Windows 路径，不能使用 {}",
@@ -384,6 +391,7 @@ pub fn launch_direct(project: &Project, group_name: &str, kind: LauncherKind) ->
     let tool = match kind {
         LauncherKind::Wsl | LauncherKind::PowerShell => ToolKind::Terminal,
         LauncherKind::VsCode => ToolKind::Vscode,
+        LauncherKind::Explorer => ToolKind::Explorer,
     };
     launcher::launch(project, group_name, kind, tool).map_err(|error| anyhow::anyhow!(error))
 }

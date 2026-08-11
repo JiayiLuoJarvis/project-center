@@ -8,6 +8,7 @@ pub enum LauncherKind {
     Wsl,
     PowerShell,
     VsCode,
+    Explorer,
 }
 
 impl LauncherKind {
@@ -16,6 +17,7 @@ impl LauncherKind {
             Self::Wsl => "WSL",
             Self::PowerShell => "PowerShell",
             Self::VsCode => "IDE 启动",
+            Self::Explorer => "文件夹",
         }
     }
 }
@@ -27,6 +29,7 @@ pub enum ToolKind {
     Terminal,
     Vscode,
     Cursor,
+    Explorer,
 }
 
 impl ToolKind {
@@ -37,6 +40,7 @@ impl ToolKind {
             Self::Terminal => "终端",
             Self::Vscode => "VS Code",
             Self::Cursor => "Cursor",
+            Self::Explorer => "文件夹",
         }
     }
 }
@@ -85,6 +89,10 @@ pub fn open_vs_code(p: &Project) -> Result<(), String> {
 pub fn open_cursor(p: &Project) -> Result<(), String> {
     spawn_quiet("cmd", &["/c", "cursor", p.path.as_str()])
         .map_err(|e| format!("Cursor 启动失败: {e}"))
+}
+
+pub fn open_explorer(p: &Project) -> Result<(), String> {
+    spawn_quiet("explorer.exe", &[p.path.as_str()]).map_err(|e| format!("资源管理器启动失败: {e}"))
 }
 
 fn open_wsl_tool(p: &Project, group_name: &str, tool: &str) -> Result<(), String> {
@@ -146,6 +154,7 @@ pub fn launch(
         }
         (LauncherKind::VsCode, ToolKind::Vscode) => open_vs_code(p),
         (LauncherKind::VsCode, ToolKind::Cursor) => open_cursor(p),
+        (LauncherKind::Explorer, ToolKind::Explorer) => open_explorer(p),
         _ => Err("不支持的启动组合".into()),
     }
 }
@@ -159,5 +168,11 @@ mod tests {
         let project = Project::new("pcs", "C:\\dev\\pcs", "/mnt/c/dev/pcs");
 
         assert_eq!(console_title(&project, "工具"), "pcs - 工具");
+    }
+
+    #[test]
+    fn explorer_labels() {
+        assert_eq!(LauncherKind::Explorer.label(), "文件夹");
+        assert_eq!(ToolKind::Explorer.label(), "文件夹");
     }
 }
