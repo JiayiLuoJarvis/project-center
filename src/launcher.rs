@@ -1,7 +1,7 @@
 use std::process::{Command, Stdio};
 
 use crate::models::Project;
-use windows_sys::Win32::System::Console::SetConsoleTitleW;
+use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, SetConsoleTitleW};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LauncherKind {
@@ -49,6 +49,19 @@ fn spawn_quiet(cmd: &str, args: &[&str]) -> std::io::Result<()> {
     c.spawn().map(|_| ())
 }
 
+/// 在当前控制台内等待子进程结束；期间忽略 Ctrl+C / Ctrl+Break，
+/// 避免信号误杀本进程后由外层 shell 抢回控制台输入，导致被启动的工具收不到按键。
+fn wait_console_child(mut child: std::process::Child) -> std::io::Result<()> {
+    unsafe {
+        SetConsoleCtrlHandler(None, 1);
+    }
+    let result = child.wait();
+    unsafe {
+        SetConsoleCtrlHandler(None, 0);
+    }
+    result.map(|_| ())
+}
+
 fn console_title(project: &Project, group_name: &str) -> String {
     format!("{} - {}", project.name, group_name)
 }
@@ -77,43 +90,43 @@ pub fn open_cursor(p: &Project) -> Result<(), String> {
 fn open_wsl_tool(p: &Project, group_name: &str, tool: &str) -> Result<(), String> {
     set_console_title(p, group_name);
     let linux = p.linux_path();
-    Command::new("wsl.exe")
+    let child = Command::new("wsl.exe")
         .args(["--cd", linux.as_str(), "--", tool])
         .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("{} 启动失败: {e}", tool))
+        .map_err(|e| format!("{} 启动失败: {e}", tool))?;
+    wait_console_child(child).map_err(|e| format!("等待 {} 结束失败: {e}", tool))
 }
 
 fn open_ps_tool(p: &Project, group_name: &str, tool: &str) -> Result<(), String> {
     set_console_title(p, group_name);
     let escaped = p.path.replace('\'', "''");
     let script = format!("Set-Location -LiteralPath '{escaped}'; {tool}");
-    Command::new("powershell.exe")
-        .args(["-NoExit", "-Command", script.as_str()])
+    let child = Command::new("powershell.exe")
+        .args(["-Command", script.as_str()])
         .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("{} 启动失败: {e}", tool))
+        .map_err(|e| format!("{} 启动失败: {e}", tool))?;
+    wait_console_child(child).map_err(|e| format!("等待 {} 结束失败: {e}", tool))
 }
 
 pub fn open_powershell(p: &Project, group_name: &str) -> Result<(), String> {
     set_console_title(p, group_name);
     let escaped = p.path.replace('\'', "''");
     let script = format!("Set-Location -LiteralPath '{escaped}'");
-    Command::new("powershell.exe")
+    let child = Command::new("powershell.exe")
         .args(["-NoExit", "-Command", script.as_str()])
         .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("PowerShell 启动失败: {e}"))
+        .map_err(|e| format!("PowerShell 启动失败: {e}"))?;
+    wait_console_child(child).map_err(|e| format!("等待 PowerShell 结束失败: {e}"))
 }
 
 pub fn open_wsl(p: &Project, group_name: &str) -> Result<(), String> {
     set_console_title(p, group_name);
     let linux = p.linux_path();
-    Command::new("wsl.exe")
+    let child = Command::new("wsl.exe")
         .args(["--cd", linux.as_str()])
         .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("WSL 启动失败: {e}"))
+        .map_err(|e| format!("WSL 启动失败: {e}"))?;
+    wait_console_child(child).map_err(|e| format!("等待 WSL 结束失败: {e}"))
 }
 
 pub fn launch(

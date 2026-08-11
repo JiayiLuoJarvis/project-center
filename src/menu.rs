@@ -155,7 +155,7 @@ fn project_actions(
                 };
                 launcher::launch(&project, group_name, kind, tool)
                     .map_err(|error| anyhow::anyhow!(error))?;
-                return Ok(true);
+                continue;
             }
             1 => edit_project(data, group_name, &project, theme)?,
             2 => {
