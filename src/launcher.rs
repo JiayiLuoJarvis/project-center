@@ -1,56 +1,47 @@
-use std::process::{Command, Stdio};
+use std::process::Command;
 
-use crate::models::Project;
 use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, SetConsoleTitleW};
 
+use crate::models::Project;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LauncherKind {
+pub enum LaunchEnv {
     Wsl,
     PowerShell,
-    VsCode,
+    Ide,
     Explorer,
 }
 
-impl LauncherKind {
+impl LaunchEnv {
     pub fn label(self) -> &'static str {
         match self {
             Self::Wsl => "WSL",
             Self::PowerShell => "PowerShell",
-            Self::VsCode => "IDE 启动",
+            Self::Ide => "IDE",
             Self::Explorer => "文件夹",
         }
     }
-}
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ToolKind {
-    Opencode,
-    CursorAgent,
-    Terminal,
-    Vscode,
-    Cursor,
-    Explorer,
-}
-
-impl ToolKind {
-    pub fn label(self) -> &'static str {
+    /// 自定义命令显示用短标签：wsl / ps / ide。
+    pub fn short_label(self) -> &'static str {
         match self {
-            Self::Opencode => "opencode",
-            Self::CursorAgent => "cursor-agent",
-            Self::Terminal => "终端",
-            Self::Vscode => "VS Code",
-            Self::Cursor => "Cursor",
-            Self::Explorer => "文件夹",
+            Self::Wsl => "wsl",
+            Self::PowerShell => "ps",
+            Self::Ide => "ide",
+            Self::Explorer => "",
         }
     }
-}
 
-/// 非交互式子进程：丢弃 stdio，避免占用父进程管道句柄。
-fn spawn_quiet(cmd: &str, args: &[&str]) -> std::io::Result<()> {
-    let mut c = Command::new(cmd);
-    c.args(args);
-    c.stdout(Stdio::null()).stderr(Stdio::null());
-    c.spawn().map(|_| ())
+    /// 解析项目自定义命令的 env 字符串：wsl / powershell / ide（大小写不敏感），空或非法视为 ide。
+    pub fn from_command_env(env: &str) -> LaunchEnv {
+        if env.eq_ignore_ascii_case("wsl") {
+            Self::Wsl
+        } else if env.eq_ignore_ascii_case("powershell") {
+            Self::PowerShell
+        } else {
+            Self::Ide
+        }
+    }
 }
 
 /// 在当前控制台内等待子进程结束；期间忽略 Ctrl+C / Ctrl+Break，
@@ -81,82 +72,104 @@ fn set_console_title(project: &Project, group_name: &str) {
     }
 }
 
-pub fn open_vs_code(p: &Project) -> Result<(), String> {
-    spawn_quiet("cmd", &["/c", "code", p.path.as_str()])
-        .map_err(|e| format!("VS Code 启动失败: {e}"))
+/// 构造 `wsl.exe` 参数：`--cd <linux> [-- <command>]`；command 为空表示裸终端。
+fn wsl_args(linux: &str, command: &str) -> Vec<String> {
+    let mut args = vec!["--cd".to_string(), linux.to_string()];
+    if !command.trim().is_empty() {
+        // `-e bash -lc` 而非 `-- <cmd>`：后者会把整条命令当单个可执行名（
+        // 含空格/管道/引号的命令会报 command not found），bash 会正确重新解析。
+        args.push("-e".to_string());
+        args.push("bash".to_string());
+        args.push("-lc".to_string());
+        args.push(command.to_string());
+    }
+    args
 }
 
-pub fn open_cursor(p: &Project) -> Result<(), String> {
-    spawn_quiet("cmd", &["/c", "cursor", p.path.as_str()])
-        .map_err(|e| format!("Cursor 启动失败: {e}"))
+/// 构造 PowerShell 脚本：`Set-Location -LiteralPath '<win>'; <command>`；
+/// command 为空时仅切换目录（裸终端）。
+fn powershell_script(win_path: &str, command: &str) -> String {
+    let escaped = win_path.replace('\'', "''");
+    let mut script = format!("Set-Location -LiteralPath '{escaped}'");
+    if !command.trim().is_empty() {
+        script.push_str(&format!("; {command}"));
+    }
+    script
 }
 
-pub fn open_explorer(p: &Project) -> Result<(), String> {
-    spawn_quiet("explorer.exe", &[p.path.as_str()]).map_err(|e| format!("资源管理器启动失败: {e}"))
-}
-
-fn open_wsl_tool(p: &Project, group_name: &str, tool: &str) -> Result<(), String> {
+fn spawn_wsl(p: &Project, group_name: &str, command: &str) -> Result<std::process::Child, String> {
     set_console_title(p, group_name);
-    let linux = p.linux_path();
-    let child = Command::new("wsl.exe")
-        .args(["--cd", linux.as_str(), "--", tool])
+    Command::new("wsl.exe")
+        .args(wsl_args(&p.linux_path(), command))
         .spawn()
-        .map_err(|e| format!("{} 启动失败: {e}", tool))?;
-    wait_console_child(child).map_err(|e| format!("等待 {} 结束失败: {e}", tool))
+        .map_err(|e| format!("WSL 启动失败: {e}"))
 }
 
-fn open_ps_tool(p: &Project, group_name: &str, tool: &str) -> Result<(), String> {
-    set_console_title(p, group_name);
-    let escaped = p.path.replace('\'', "''");
-    let script = format!("Set-Location -LiteralPath '{escaped}'; {tool}");
-    let child = Command::new("powershell.exe")
-        .args(["-Command", script.as_str()])
-        .spawn()
-        .map_err(|e| format!("{} 启动失败: {e}", tool))?;
-    wait_console_child(child).map_err(|e| format!("等待 {} 结束失败: {e}", tool))
-}
-
-pub fn open_powershell(p: &Project, group_name: &str) -> Result<(), String> {
-    set_console_title(p, group_name);
-    let escaped = p.path.replace('\'', "''");
-    let script = format!("Set-Location -LiteralPath '{escaped}'");
-    let child = Command::new("powershell.exe")
-        .args(["-NoExit", "-Command", script.as_str()])
-        .spawn()
-        .map_err(|e| format!("PowerShell 启动失败: {e}"))?;
-    wait_console_child(child).map_err(|e| format!("等待 PowerShell 结束失败: {e}"))
-}
-
-pub fn open_wsl(p: &Project, group_name: &str) -> Result<(), String> {
-    set_console_title(p, group_name);
-    let linux = p.linux_path();
-    let child = Command::new("wsl.exe")
-        .args(["--cd", linux.as_str()])
-        .spawn()
-        .map_err(|e| format!("WSL 启动失败: {e}"))?;
-    wait_console_child(child).map_err(|e| format!("等待 WSL 结束失败: {e}"))
-}
-
-pub fn launch(
+fn spawn_powershell(
     p: &Project,
     group_name: &str,
-    kind: LauncherKind,
-    tool: ToolKind,
-) -> Result<(), String> {
-    match (kind, tool) {
-        (LauncherKind::Wsl, ToolKind::Terminal) => open_wsl(p, group_name),
-        (LauncherKind::Wsl, ToolKind::Opencode) => open_wsl_tool(p, group_name, "opencode"),
-        (LauncherKind::Wsl, ToolKind::CursorAgent) => open_wsl_tool(p, group_name, "cursor-agent"),
-        (LauncherKind::PowerShell, ToolKind::Terminal) => open_powershell(p, group_name),
-        (LauncherKind::PowerShell, ToolKind::Opencode) => open_ps_tool(p, group_name, "opencode"),
-        (LauncherKind::PowerShell, ToolKind::CursorAgent) => {
-            open_ps_tool(p, group_name, "cursor-agent")
-        }
-        (LauncherKind::VsCode, ToolKind::Vscode) => open_vs_code(p),
-        (LauncherKind::VsCode, ToolKind::Cursor) => open_cursor(p),
-        (LauncherKind::Explorer, ToolKind::Explorer) => open_explorer(p),
-        _ => Err("不支持的启动组合".into()),
+    command: &str,
+) -> Result<std::process::Child, String> {
+    set_console_title(p, group_name);
+    let script = powershell_script(&p.path, command);
+    Command::new("powershell.exe")
+        .args(["-NoExit", "-Command", script.as_str()])
+        .spawn()
+        .map_err(|e| format!("PowerShell 启动失败: {e}"))
+}
+
+fn spawn_ide(p: &Project, command: &str) -> Result<std::process::Child, String> {
+    let mut args = vec!["/c".to_string(), command.to_string(), p.path.clone()];
+    args.retain(|arg| !arg.trim().is_empty());
+    Command::new("cmd")
+        .args(&args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("IDE 启动失败: {e}"))
+}
+
+fn spawn_explorer(p: &Project) -> Result<std::process::Child, String> {
+    Command::new("explorer.exe")
+        .arg(&p.path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("资源管理器启动失败: {e}"))
+}
+
+/// 生成子进程（不等待）：WSL/PowerShell 返回 `Some(child)` 供调用方在
+/// 「生成后、等待前」插入记录等操作后自行 `wait_direct`；
+/// IDE/资源管理器静默启动、无等待，返回 `None`。
+/// 校验 Windows 路径可用性（与旧 `launch_direct` 语义一致）。
+pub fn spawn_direct(
+    p: &Project,
+    group_name: &str,
+    env: LaunchEnv,
+    command: &str,
+) -> Result<Option<std::process::Child>, String> {
+    if matches!(
+        env,
+        LaunchEnv::PowerShell | LaunchEnv::Ide | LaunchEnv::Explorer
+    ) && !p.has_windows_path()
+    {
+        return Err(format!(
+            "项目 `{}` 没有 Windows 路径，不能使用 {}",
+            p.name,
+            env.label()
+        ));
     }
+    match env {
+        LaunchEnv::Wsl => spawn_wsl(p, group_name, command).map(Some),
+        LaunchEnv::PowerShell => spawn_powershell(p, group_name, command).map(Some),
+        LaunchEnv::Ide => spawn_ide(p, command).map(|_| None),
+        LaunchEnv::Explorer => spawn_explorer(p).map(|_| None),
+    }
+}
+
+/// 等待 WSL/PowerShell 子进程退出（阻塞、抑制 Ctrl+C）。
+pub fn wait_direct(child: std::process::Child) -> Result<(), String> {
+    wait_console_child(child).map_err(|e| format!("等待子进程结束失败: {e}"))
 }
 
 #[cfg(test)]
@@ -171,8 +184,79 @@ mod tests {
     }
 
     #[test]
-    fn explorer_labels() {
-        assert_eq!(LauncherKind::Explorer.label(), "文件夹");
-        assert_eq!(ToolKind::Explorer.label(), "文件夹");
+    fn env_labels() {
+        assert_eq!(LaunchEnv::Wsl.label(), "WSL");
+        assert_eq!(LaunchEnv::PowerShell.label(), "PowerShell");
+        assert_eq!(LaunchEnv::Ide.label(), "IDE");
+        assert_eq!(LaunchEnv::Explorer.label(), "文件夹");
+    }
+
+    #[test]
+    fn env_short_labels() {
+        assert_eq!(LaunchEnv::Wsl.short_label(), "wsl");
+        assert_eq!(LaunchEnv::PowerShell.short_label(), "ps");
+        assert_eq!(LaunchEnv::Ide.short_label(), "ide");
+    }
+
+    #[test]
+    fn from_command_env_parses_case_insensitive() {
+        assert_eq!(LaunchEnv::from_command_env("wsl"), LaunchEnv::Wsl);
+        assert_eq!(LaunchEnv::from_command_env("WSL"), LaunchEnv::Wsl);
+        assert_eq!(
+            LaunchEnv::from_command_env("powershell"),
+            LaunchEnv::PowerShell
+        );
+        assert_eq!(
+            LaunchEnv::from_command_env("PowerShell"),
+            LaunchEnv::PowerShell
+        );
+        assert_eq!(LaunchEnv::from_command_env("ide"), LaunchEnv::Ide);
+        assert_eq!(LaunchEnv::from_command_env("IDE"), LaunchEnv::Ide);
+    }
+
+    #[test]
+    fn from_command_env_invalid_falls_back_to_ide() {
+        assert_eq!(LaunchEnv::from_command_env(""), LaunchEnv::Ide);
+        assert_eq!(LaunchEnv::from_command_env("bash"), LaunchEnv::Ide);
+        assert_eq!(LaunchEnv::from_command_env("  "), LaunchEnv::Ide);
+    }
+
+    #[test]
+    fn wsl_args_bare_and_with_command() {
+        assert_eq!(
+            wsl_args("/mnt/e/dev/app", ""),
+            vec!["--cd", "/mnt/e/dev/app"]
+        );
+        assert_eq!(
+            wsl_args("/mnt/e/dev/app", "opencode"),
+            vec!["--cd", "/mnt/e/dev/app", "-e", "bash", "-lc", "opencode"]
+        );
+        assert_eq!(
+            wsl_args("/mnt/e/dev/app", "make build && npm run dev"),
+            vec![
+                "--cd",
+                "/mnt/e/dev/app",
+                "-e",
+                "bash",
+                "-lc",
+                "make build && npm run dev"
+            ]
+        );
+    }
+
+    #[test]
+    fn powershell_script_bare_and_with_command() {
+        assert_eq!(
+            powershell_script(r"E:\dev\app", ""),
+            r"Set-Location -LiteralPath 'E:\dev\app'"
+        );
+        assert_eq!(
+            powershell_script(r"E:\dev\app", "opencode"),
+            r"Set-Location -LiteralPath 'E:\dev\app'; opencode"
+        );
+        assert_eq!(
+            powershell_script(r"E:\it's", "opencode"),
+            r"Set-Location -LiteralPath 'E:\it''s'; opencode"
+        );
     }
 }
