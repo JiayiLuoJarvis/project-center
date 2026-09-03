@@ -10,15 +10,34 @@ const BACKUP_PREFIX: &str = "projects-";
 
 pub struct Store;
 
+/// APPDATA 下数据目录名：release → 生产 `project_center`；debug → `project_center_dev`。
+fn data_dir_name() -> &'static str {
+    if cfg!(debug_assertions) {
+        "project_center_dev"
+    } else {
+        "project_center"
+    }
+}
+
+/// 无 APPDATA 时的 HOME 回退目录名（带点前缀）。
+fn home_dir_name() -> &'static str {
+    if cfg!(debug_assertions) {
+        ".project_center_dev"
+    } else {
+        ".project_center"
+    }
+}
+
 impl Store {
-    /// `%APPDATA%\project_center\projects.json`；APPDATA 缺失时回退
-    /// `%USERPROFILE%\.project_center\projects.json`。
+    /// release：`%APPDATA%\project_center\projects.json`；
+    /// debug：`%APPDATA%\project_center_dev\projects.json`。
+    /// APPDATA 缺失时回退 `%USERPROFILE%`（或 `HOME`）下对应的点目录。
     pub fn file_path() -> PathBuf {
         if let Some(appdata) = std::env::var_os("APPDATA") {
             let s = appdata.to_string_lossy();
             if !s.trim().is_empty() {
                 return PathBuf::from(appdata)
-                    .join("project_center")
+                    .join(data_dir_name())
                     .join("projects.json");
             }
         }
@@ -26,7 +45,7 @@ impl Store {
             .or_else(|| std::env::var_os("HOME"))
             .unwrap_or_default();
         PathBuf::from(home)
-            .join(".project_center")
+            .join(home_dir_name())
             .join("projects.json")
     }
 
@@ -243,6 +262,45 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("pcs_test_{stamp}"))
+    }
+
+    #[test]
+    fn file_path_matches_build_profile() {
+        let path = Store::file_path();
+        assert!(
+            path.ends_with("projects.json"),
+            "expected projects.json suffix, got {}",
+            path.display()
+        );
+        if cfg!(debug_assertions) {
+            assert_eq!(data_dir_name(), "project_center_dev");
+            assert_eq!(home_dir_name(), ".project_center_dev");
+            assert!(
+                path.components()
+                    .any(|c| c.as_os_str() == "project_center_dev"
+                        || c.as_os_str() == ".project_center_dev"),
+                "debug path must use project_center_dev, got {}",
+                path.display()
+            );
+        } else {
+            assert_eq!(data_dir_name(), "project_center");
+            assert_eq!(home_dir_name(), ".project_center");
+            assert!(
+                path.components().any(
+                    |c| c.as_os_str() == "project_center" || c.as_os_str() == ".project_center"
+                ),
+                "release path must use project_center, got {}",
+                path.display()
+            );
+            assert!(
+                !path
+                    .components()
+                    .any(|c| c.as_os_str() == "project_center_dev"
+                        || c.as_os_str() == ".project_center_dev"),
+                "release path must not use project_center_dev, got {}",
+                path.display()
+            );
+        }
     }
 
     #[test]

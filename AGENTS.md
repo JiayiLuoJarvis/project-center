@@ -19,7 +19,10 @@
 
 ## Data Contracts
 
-- Runtime data is `%APPDATA%\project_center\projects.json`, falling back to `%USERPROFILE%\.project_center\projects.json` (or `HOME` if neither is available). CLI/menu mutations affect this real file; tests use `load_from`/`save_to` with temporary paths.
+- Runtime projects data depends on build profile (`cfg!(debug_assertions)`):
+  - **release** (`cargo build --release` / deployed exe): `%APPDATA%\project_center\projects.json`, fallback `%USERPROFILE%\.project_center\projects.json` (or `HOME`).
+  - **debug** (`cargo run` / `cargo build` / default `cargo test` binary): `%APPDATA%\project_center_dev\projects.json`, fallback `%USERPROFILE%\.project_center_dev\projects.json`.
+  - Backups live under each data root's `backups\`. Dev must not use `cargo run --release` unless intentionally mutating production data. Tests use `load_from`/`save_to` with temporary paths; `config.json` stays next to the exe.
 - Every project has a UUID `id`. Any `<name>` argument also accepts `@<id>` (case-insensitive, unique prefix allowed); ids survive renames, and `Store::load` backfills missing ids on legacy data and writes back immediately. A project name starting with `@` is unreachable by name.
 - Keep the legacy JSON schema: the WSL field is `wslPath` (`#[serde(rename = "wslPath")]`) and optional fields use `#[serde(default)]`.
 - `Store::load` treats missing or corrupt JSON as empty data. `Store::save_to` must retain its atomic sequence: write `.json.tmp`, remove the old file, then rename.

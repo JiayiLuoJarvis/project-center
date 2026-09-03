@@ -819,19 +819,12 @@ impl App {
     }
 
     fn on_add(&mut self, data: &ProjectData, _config: &AppConfig) {
-        if self.focus == Focus::Groups
-            && !self.left_is_trash(data, self.left_sel)
-            && !self.left_is_config(data, self.left_sel)
-        {
+        if self.focus == Focus::Groups {
             self.open_form(
                 "新增分组",
                 vec![Self::text_field("分组名", ""), Self::text_field("别名", "")],
                 FormKind::AddGroup,
             );
-            return;
-        }
-        if self.focus == Focus::Groups {
-            self.flash("请在分组区按 a 新增分组");
             return;
         }
         match self.right_pane.clone() {
@@ -2039,6 +2032,44 @@ mod tests {
         assert_eq!(app.focus, Focus::Groups);
         app.handle(key(KeyCode::Tab), &mut data, &mut config);
         assert_eq!(app.focus, Focus::Projects);
+    }
+
+    #[test]
+    fn add_group_when_no_groups_left() {
+        let mut data = ProjectData::default();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Groups;
+        app.left_sel = 0;
+        app.sync_right_pane(&data);
+        assert!(app.left_is_trash(&data, app.left_sel));
+        app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
+        assert!(matches!(
+            app.mode,
+            Mode::Form {
+                kind: FormKind::AddGroup,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn add_group_when_left_sel_on_trash() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Groups;
+        app.left_sel = data.groups.len();
+        app.sync_right_pane(&data);
+        assert!(app.left_is_trash(&data, app.left_sel));
+        app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
+        assert!(matches!(
+            app.mode,
+            Mode::Form {
+                kind: FormKind::AddGroup,
+                ..
+            }
+        ));
     }
 
     #[test]
