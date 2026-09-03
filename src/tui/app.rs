@@ -438,6 +438,26 @@ impl App {
         self.mode = Mode::Browse;
     }
 
+    fn pop_right_pane(&mut self, data: &ProjectData, config: &AppConfig) {
+        match &self.right_pane {
+            RightPane::ConfigTools { env } => {
+                let sel = match env {
+                    ConfigEnv::Wsl => 0,
+                    ConfigEnv::PowerShell => 1,
+                    ConfigEnv::Ide => 2,
+                };
+                self.right_pane = RightPane::ConfigEnvs;
+                self.right_sel = sel;
+            }
+            RightPane::Commands { .. } => {
+                self.right_pane = RightPane::Projects;
+                self.right_sel = 0;
+                self.clamp_selection(data, config);
+            }
+            _ => {}
+        }
+    }
+
     fn text_field(label: &str, value: impl Into<String>) -> FormField {
         FormField::Text {
             label: label.into(),
@@ -562,6 +582,8 @@ impl App {
                 if !self.filter.is_empty() {
                     self.filter.clear();
                     self.clamp_selection(data, config);
+                } else {
+                    self.pop_right_pane(data, config);
                 }
                 return Outcome::Continue;
             }
@@ -2008,6 +2030,74 @@ mod tests {
         app.handle(key(KeyCode::Esc), &mut data, &mut config);
         assert!(app.filter.is_empty());
         assert!(matches!(app.mode, Mode::Browse));
+    }
+
+    #[test]
+    fn esc_pops_config_tools_to_envs() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.left_sel = app.left_count(&data) - 1;
+        app.sync_right_pane(&data);
+        app.focus = Focus::Projects;
+        assert!(matches!(app.right_pane, RightPane::ConfigEnvs));
+        app.right_sel = 0;
+        app.handle(key(KeyCode::Enter), &mut data, &mut config);
+        assert!(matches!(
+            app.right_pane,
+            RightPane::ConfigTools {
+                env: ConfigEnv::Wsl
+            }
+        ));
+        app.handle(key(KeyCode::Esc), &mut data, &mut config);
+        assert!(matches!(app.right_pane, RightPane::ConfigEnvs));
+        assert_eq!(app.right_sel, 0);
+    }
+
+    #[test]
+    fn esc_clears_filter_before_popping_config_tools() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.left_sel = app.left_count(&data) - 1;
+        app.sync_right_pane(&data);
+        app.focus = Focus::Projects;
+        app.right_sel = 1;
+        app.handle(key(KeyCode::Enter), &mut data, &mut config);
+        assert!(matches!(
+            app.right_pane,
+            RightPane::ConfigTools {
+                env: ConfigEnv::PowerShell
+            }
+        ));
+        app.filter = "x".into();
+        app.handle(key(KeyCode::Esc), &mut data, &mut config);
+        assert!(app.filter.is_empty());
+        assert!(matches!(
+            app.right_pane,
+            RightPane::ConfigTools {
+                env: ConfigEnv::PowerShell
+            }
+        ));
+        app.handle(key(KeyCode::Esc), &mut data, &mut config);
+        assert!(matches!(app.right_pane, RightPane::ConfigEnvs));
+        assert_eq!(app.right_sel, 1);
+    }
+
+    #[test]
+    fn esc_pops_commands_to_projects() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        let id = data.groups[0].projects[0].id.clone();
+        app.right_pane = RightPane::Commands {
+            group: "dev".into(),
+            project_id: id,
+        };
+        app.focus = Focus::Projects;
+        app.right_sel = 0;
+        app.handle(key(KeyCode::Esc), &mut data, &mut config);
+        assert!(matches!(app.right_pane, RightPane::Projects));
     }
 
     #[test]
