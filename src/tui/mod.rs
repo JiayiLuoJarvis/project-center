@@ -73,12 +73,12 @@ fn loop_ui(
                 *terminal = ratatui::try_init()?;
                 app.mode = Mode::Browse;
             }
-            Outcome::PickFolder { group, name } => {
+            Outcome::PickFolder => {
                 ratatui::restore();
                 let path = rfd::FileDialog::new()
                     .pick_folder()
                     .map(|p| p.to_string_lossy().trim().to_string());
-                app.resume_after_folder_pick(data, &group, &name, path);
+                app.resume_after_folder_pick(path);
                 *terminal = ratatui::try_init()?;
             }
         }

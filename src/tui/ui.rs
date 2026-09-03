@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 
 use crate::config::AppConfig;
 use crate::models::ProjectData;
-use crate::tui::app::{App, Focus, Mode, RightPane};
+use crate::tui::app::{App, Focus, FormField, Mode, RightPane};
 use crate::tui::theme;
 use crate::tui::widgets;
 
@@ -29,8 +29,12 @@ pub fn render(frame: &mut Frame, app: &App, data: &ProjectData, config: &AppConf
 
     match &app.mode {
         Mode::LaunchPicker {
-            labels, selected, ..
-        } => render_modal_list(frame, area, "选择启动方式", labels, *selected),
+            options,
+            labels,
+            selected,
+            filter,
+            ..
+        } => render_launch_picker(frame, area, options, labels, *selected, filter),
         Mode::ActionMenu {
             items, selected, ..
         } => render_modal_list(frame, area, "操作", items, *selected),
@@ -42,9 +46,13 @@ pub fn render(frame: &mut Frame, app: &App, data: &ProjectData, config: &AppConf
         } => render_modal_list(frame, area, title, items, *selected),
         Mode::Help => render_help(frame, area),
         Mode::Confirm { message, .. } => render_confirm(frame, chunks[2], message),
-        Mode::InlineInput { prompt, buffer, .. } => {
-            render_input(frame, chunks[2], prompt, buffer, false)
-        }
+        Mode::Form {
+            title,
+            fields,
+            focus,
+            error,
+            ..
+        } => render_form(frame, area, title, fields, *focus, error.as_deref()),
         Mode::Filter => render_input(frame, chunks[2], "/", &app.filter, true),
         Mode::Browse => {}
     }
@@ -53,7 +61,7 @@ pub fn render(frame: &mut Frame, app: &App, data: &ProjectData, config: &AppConf
 fn render_top(frame: &mut Frame, area: Rect, app: &App, data: &ProjectData) {
     let ctx = match &app.right_pane {
         RightPane::Projects => {
-            if let Some(gi) = App::left_is_group(data, app.left_sel) {
+            if let Some(gi) = app.left_is_group(data, app.left_sel) {
                 let g = &data.groups[gi];
                 format!("{} · {} 项目", g.name, g.projects.len())
             } else {
@@ -96,18 +104,28 @@ fn render_left(frame: &mut Frame, area: Rect, app: &App, data: &ProjectData) {
         .style(theme::panel());
 
     let mut items: Vec<ListItem> = Vec::new();
-    for g in &data.groups {
-        items.push(widgets::simple_item(format!(
-            "{}  {}",
-            g.name,
-            g.projects.len()
-        )));
+    for item in app.left_items(data) {
+        match item {
+            crate::tui::app::LeftItem::Group(gi) => {
+                let g = &data.groups[gi];
+                let label = if g.alias.trim().is_empty() {
+                    format!("{}  {}", g.name, g.projects.len())
+                } else {
+                    format!("{} [{}]  {}", g.name, g.alias, g.projects.len())
+                };
+                items.push(widgets::simple_item(label));
+            }
+            crate::tui::app::LeftItem::Trash => {
+                items.push(widgets::simple_item(format!(
+                    "回收站  {}",
+                    data.trash.len()
+                )));
+            }
+            crate::tui::app::LeftItem::Config => {
+                items.push(widgets::simple_item("配置"));
+            }
+        }
     }
-    items.push(widgets::simple_item(format!(
-        "回收站  {}",
-        data.trash.len()
-    )));
-    items.push(widgets::simple_item("配置"));
 
     let mut state = ListState::default();
     state.select(Some(app.left_sel.min(items.len().saturating_sub(1))));
@@ -161,7 +179,7 @@ fn right_content<'a>(
 ) -> (String, Vec<ListItem<'static>>) {
     match &app.right_pane {
         RightPane::Projects => {
-            if let Some(gi) = App::left_is_group(data, app.left_sel) {
+            if let Some(gi) = app.left_is_group(data, app.left_sel) {
                 let name = data.groups[gi].name.clone();
                 let indices = app.filtered_project_indices(data, gi);
                 let items = indices
@@ -290,6 +308,65 @@ fn render_modal_list(
     frame.render_stateful_widget(list, area, &mut state);
 }
 
+fn render_launch_picker(
+    frame: &mut Frame,
+    area: Rect,
+    options: &[crate::menu::LaunchOption],
+    labels: &[String],
+    selected: usize,
+    filter: &str,
+) {
+    use crate::tui::app::App;
+    let area = modal_area(area);
+    frame.render_widget(Clear, area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(3)])
+        .split(area);
+    let filter_line = if filter.is_empty() {
+        " 过滤: █  （直接输入）".to_string()
+    } else {
+        format!(" 过滤: {filter}█")
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(filter_line, theme::accent())))
+            .block(
+                Block::default()
+                    .title(Span::styled(" 选择启动方式 ", theme::title()))
+                    .borders(Borders::ALL)
+                    .border_style(theme::border(true))
+                    .style(theme::panel()),
+            )
+            .style(theme::base()),
+        chunks[0],
+    );
+    let indices = App::launch_filter_indices(options, labels, filter);
+    let list_items: Vec<ListItem> = if indices.is_empty() {
+        vec![widgets::simple_item("（无匹配）")]
+    } else {
+        indices
+            .iter()
+            .map(|&i| labels.get(i).cloned().unwrap_or_else(|| options[i].label()))
+            .map(widgets::simple_item)
+            .collect()
+    };
+    let mut state = ListState::default();
+    if !indices.is_empty() {
+        let pos = indices.iter().position(|&i| i == selected).unwrap_or(0);
+        state.select(Some(pos));
+    }
+    let list = List::new(list_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme::border(true))
+                .style(theme::panel()),
+        )
+        .highlight_style(widgets::selected_style())
+        .highlight_symbol("▶ ");
+    frame.render_stateful_widget(list, chunks[1], &mut state);
+}
+
 fn render_help(frame: &mut Frame, area: Rect) {
     let area = modal_area(area);
     frame.render_widget(Clear, area);
@@ -318,6 +395,90 @@ fn render_confirm(frame: &mut Frame, area: Rect, message: &str) {
         ),
     ]);
     frame.render_widget(Paragraph::new(line).style(theme::base()), area);
+}
+
+fn render_form(
+    frame: &mut Frame,
+    area: Rect,
+    title: &str,
+    fields: &[FormField],
+    focus: usize,
+    error: Option<&str>,
+) {
+    let area = modal_area(area);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(Span::styled(format!(" {title} "), theme::title()))
+        .borders(Borders::ALL)
+        .border_style(theme::border(true))
+        .style(theme::panel());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, field) in fields.iter().enumerate() {
+        let focused = i == focus;
+        match field {
+            FormField::Text { label, value } => {
+                let label_style = if focused {
+                    theme::accent().add_modifier(Modifier::BOLD)
+                } else {
+                    theme::muted()
+                };
+                lines.push(Line::from(Span::styled(label.clone(), label_style)));
+                let mut spans = vec![
+                    Span::styled(
+                        if focused { "▶ " } else { "  " },
+                        if focused {
+                            theme::accent()
+                        } else {
+                            theme::muted()
+                        },
+                    ),
+                    Span::styled(
+                        value.clone(),
+                        if focused {
+                            theme::selected()
+                        } else {
+                            theme::base()
+                        },
+                    ),
+                ];
+                if focused {
+                    spans.push(Span::styled("█", theme::accent()));
+                }
+                lines.push(Line::from(spans));
+            }
+            FormField::Button { label } => {
+                let marker = if focused { "▶ " } else { "  " };
+                let style = if focused {
+                    theme::selected().add_modifier(Modifier::BOLD)
+                } else {
+                    theme::accent()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(marker, theme::accent()),
+                    Span::styled(format!("[ {label} ]"), style),
+                ]));
+            }
+        }
+        lines.push(Line::from(""));
+    }
+    if let Some(err) = error {
+        lines.push(Line::from(Span::styled(err.to_string(), theme::danger())));
+        lines.push(Line::from(""));
+    }
+    lines.push(Line::from(Span::styled(
+        "Tab 切换  Enter 提交/确认  Esc 取消",
+        theme::muted(),
+    )));
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .style(theme::base()),
+        inner,
+    );
 }
 
 fn render_input(frame: &mut Frame, area: Rect, prompt: &str, buffer: &str, filter: bool) {

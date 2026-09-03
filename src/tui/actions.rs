@@ -46,14 +46,19 @@ pub fn launch_labels(project: &Project, config: &AppConfig) -> (Vec<LaunchOption
     default_first(build_launch_options(project, config), project)
 }
 
-pub fn add_group(data: &mut ProjectData, name: &str) -> Result<String, String> {
-    ops::add_group(data, name).map_err(|e| e.to_string())?;
+pub fn add_group(data: &mut ProjectData, name: &str, alias: &str) -> Result<String, String> {
+    ops::add_group_with_alias(data, name, alias).map_err(|e| e.to_string())?;
     save_data(data)?;
     Ok(format!("分组已添加: {}", name.trim()))
 }
 
-pub fn rename_group(data: &mut ProjectData, old: &str, new: &str) -> Result<String, String> {
-    ops::rename_group(data, old, new).map_err(|e| e.to_string())?;
+pub fn rename_group(
+    data: &mut ProjectData,
+    old: &str,
+    new: &str,
+    alias: &str,
+) -> Result<String, String> {
+    ops::rename_group_with_alias(data, old, new, Some(alias)).map_err(|e| e.to_string())?;
     save_data(data)?;
     Ok(format!("分组已重命名: {}", new.trim()))
 }
@@ -64,36 +69,42 @@ pub fn remove_group(data: &mut ProjectData, name: &str) -> Result<String, String
     Ok(format!("分组已删除: {name}（已移入回收站）"))
 }
 
-pub fn add_project_win(
+pub fn add_project_paths(
     data: &mut ProjectData,
     group: &str,
     name: &str,
+    alias: &str,
     path: &str,
-) -> Result<String, String> {
-    let path = path.trim().to_string();
-    if path.is_empty() {
-        return Err("项目路径不能为空".into());
-    }
-    let wsl = win_path_to_linux(&path);
-    ops::add_project(data, group, Project::new(name, path, wsl)).map_err(|e| e.to_string())?;
-    save_data(data)?;
-    Ok(format!("项目已添加: {}", name.trim()))
-}
-
-pub fn add_project_wsl(
-    data: &mut ProjectData,
-    group: &str,
-    name: &str,
     wsl_path: &str,
 ) -> Result<String, String> {
-    let wsl_path = normalize(wsl_path.trim());
-    if !is_wsl_path(&wsl_path) {
-        return Err("WSL 路径必须以 / 或 ~ 开头".into());
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("项目名不能为空".into());
     }
-    ops::add_project(data, group, Project::new(name, String::new(), wsl_path))
-        .map_err(|e| e.to_string())?;
+    let path = path.trim().to_string();
+    let wsl_raw = wsl_path.trim();
+    if path.is_empty() && wsl_raw.is_empty() {
+        return Err("请填写 Windows 路径或 WSL 路径".into());
+    }
+    let wsl = if path.is_empty() {
+        let wsl = normalize(wsl_raw);
+        if !is_wsl_path(&wsl) {
+            return Err("WSL 路径必须以 / 或 ~ 开头".into());
+        }
+        wsl
+    } else if wsl_raw.is_empty() {
+        win_path_to_linux(&path)
+    } else {
+        let wsl = normalize(wsl_raw);
+        if !is_wsl_path(&wsl) {
+            return Err("WSL 路径必须以 / 或 ~ 开头".into());
+        }
+        wsl
+    };
+    let project = Project::new(name, path, wsl).with_alias(alias.trim());
+    ops::add_project(data, group, project).map_err(|e| e.to_string())?;
     save_data(data)?;
-    Ok(format!("项目已添加: {}", name.trim()))
+    Ok(format!("项目已添加: {name}"))
 }
 
 pub fn edit_project(
@@ -101,17 +112,19 @@ pub fn edit_project(
     group: &str,
     old_name: &str,
     new_name: &str,
+    alias: &str,
     path: &str,
     wsl_path: &str,
 ) -> Result<String, String> {
     let new_name = new_name.trim();
     let path = path.trim();
     let wsl_path = wsl_path.trim();
-    ops::edit_project(
+    ops::edit_project_full(
         data,
         old_name,
         Some(group),
         Some(new_name),
+        Some(alias.trim()),
         Some(path),
         Some(wsl_path),
     )

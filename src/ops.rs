@@ -4,12 +4,17 @@ use crate::models::{
     DeletedItem, Group, Project, ProjectCommand, ProjectData, current_unix_ts, win_path_to_linux,
 };
 
+fn eq_name_or_alias(name: &str, alias: &str, query: &str) -> bool {
+    name.eq_ignore_ascii_case(query)
+        || (!alias.trim().is_empty() && alias.eq_ignore_ascii_case(query))
+}
+
 pub fn find_group(data: &ProjectData, name: &str) -> Result<usize> {
     let matches: Vec<usize> = data
         .groups
         .iter()
         .enumerate()
-        .filter(|(_, group)| group.name.eq_ignore_ascii_case(name))
+        .filter(|(_, group)| eq_name_or_alias(&group.name, &group.alias, name))
         .map(|(index, _)| index)
         .collect();
     match matches.as_slice() {
@@ -17,6 +22,35 @@ pub fn find_group(data: &ProjectData, name: &str) -> Result<usize> {
         [] => bail!("未找到分组: {name}"),
         _ => bail!("分组名不唯一: {name}"),
     }
+}
+
+/// 分组 name/alias 是否与 `label` 冲突（忽略 `skip` 下标；空 label 不参与）。
+fn group_label_taken(data: &ProjectData, label: &str, skip: Option<usize>) -> bool {
+    let label = label.trim();
+    if label.is_empty() {
+        return false;
+    }
+    data.groups.iter().enumerate().any(|(index, group)| {
+        if skip == Some(index) {
+            return false;
+        }
+        group.name.eq_ignore_ascii_case(label)
+            || (!group.alias.trim().is_empty() && group.alias.eq_ignore_ascii_case(label))
+    })
+}
+
+fn project_label_taken(group: &Group, label: &str, skip: Option<usize>) -> bool {
+    let label = label.trim();
+    if label.is_empty() {
+        return false;
+    }
+    group.projects.iter().enumerate().any(|(index, project)| {
+        if skip == Some(index) {
+            return false;
+        }
+        project.name.eq_ignore_ascii_case(label)
+            || (!project.alias.trim().is_empty() && project.alias.eq_ignore_ascii_case(label))
+    })
 }
 
 fn project_matches<F>(
@@ -46,7 +80,7 @@ where
 
 pub fn find_project(data: &ProjectData, name: &str, group: Option<&str>) -> Result<(usize, usize)> {
     let matches = project_matches(data, group, |project| {
-        project.name.eq_ignore_ascii_case(name)
+        eq_name_or_alias(&project.name, &project.alias, name)
     })?;
     match matches.as_slice() {
         [match_index] => Ok(*match_index),
@@ -79,35 +113,50 @@ pub fn find_project_by_id(
     }
 }
 
-pub fn add_group(data: &mut ProjectData, name: &str) -> Result<()> {
+pub fn add_group_with_alias(data: &mut ProjectData, name: &str, alias: &str) -> Result<()> {
     let name = name.trim();
+    let alias = alias.trim();
     if name.is_empty() {
         bail!("分组名不能为空");
     }
-    if data
-        .groups
-        .iter()
-        .any(|group| group.name.eq_ignore_ascii_case(name))
-    {
+    if group_label_taken(data, name, None) {
         bail!("分组已存在: {name}");
     }
-    data.groups.push(Group::new(name));
+    if group_label_taken(data, alias, None) {
+        bail!("分组别名已存在: {alias}");
+    }
+    data.groups.push(Group::new(name).with_alias(alias));
     Ok(())
 }
 
-pub fn rename_group(data: &mut ProjectData, old_name: &str, new_name: &str) -> Result<()> {
+/// `alias` 为 `None` 时不改别名；`Some("")` 清空。
+pub fn rename_group_with_alias(
+    data: &mut ProjectData,
+    old_name: &str,
+    new_name: &str,
+    alias: Option<&str>,
+) -> Result<()> {
     let new_name = new_name.trim();
     if new_name.is_empty() {
         bail!("分组名不能为空");
     }
     let group_index = find_group(data, old_name)?;
-    if data
-        .groups
-        .iter()
-        .enumerate()
-        .any(|(index, group)| index != group_index && group.name.eq_ignore_ascii_case(new_name))
-    {
+    if group_label_taken(data, new_name, Some(group_index)) {
         bail!("分组已存在: {new_name}");
+    }
+    let next_alias = match alias {
+        Some(a) => a.trim().to_string(),
+        None => data.groups[group_index].alias.clone(),
+    };
+    if !next_alias.is_empty() && next_alias.eq_ignore_ascii_case(new_name) {
+        bail!("分组别名不能与分组名相同");
+    }
+    if let Some(alias) = alias {
+        let alias = alias.trim();
+        if group_label_taken(data, alias, Some(group_index)) {
+            bail!("分组别名已存在: {alias}");
+        }
+        data.groups[group_index].alias = alias.to_string();
     }
     data.groups[group_index].name = new_name.to_string();
     Ok(())
@@ -129,27 +178,32 @@ pub fn remove_group(data: &mut ProjectData, name: &str, force: bool) -> Result<(
 
 pub fn add_project(data: &mut ProjectData, group_name: &str, project: Project) -> Result<()> {
     let group_index = find_group(data, group_name)?;
-    if data.groups[group_index]
-        .projects
-        .iter()
-        .any(|item| item.name.eq_ignore_ascii_case(&project.name))
-    {
+    let group = &data.groups[group_index];
+    if project_label_taken(group, &project.name, None) {
         bail!("该分组中项目已存在: {}", project.name);
+    }
+    if project_label_taken(group, &project.alias, None) {
+        bail!("该分组中项目别名已存在: {}", project.alias.trim());
+    }
+    let alias = project.alias.trim();
+    if !alias.is_empty() && alias.eq_ignore_ascii_case(project.name.trim()) {
+        bail!("项目别名不能与项目名相同");
     }
     data.groups[group_index].projects.push(project);
     Ok(())
 }
 
-pub fn edit_project(
+pub fn edit_project_full(
     data: &mut ProjectData,
     name: &str,
     group: Option<&str>,
     new_name: Option<&str>,
+    alias: Option<&str>,
     path: Option<&str>,
     wsl_path: Option<&str>,
 ) -> Result<()> {
-    if new_name.is_none() && path.is_none() && wsl_path.is_none() {
-        bail!("至少提供一个修改项: --new-name、--dir 或 --wsl-path");
+    if new_name.is_none() && alias.is_none() && path.is_none() && wsl_path.is_none() {
+        bail!("至少提供一个修改项: --new-name、--alias、--dir 或 --wsl-path");
     }
     let (group_index, project_index) = find_project(data, name, group)?;
     if let Some(new_name) = new_name {
@@ -157,15 +211,23 @@ pub fn edit_project(
         if new_name.is_empty() {
             bail!("项目名不能为空");
         }
-        if data.groups[group_index]
-            .projects
-            .iter()
-            .enumerate()
-            .any(|(index, item)| index != project_index && item.name.eq_ignore_ascii_case(new_name))
-        {
+        if project_label_taken(&data.groups[group_index], new_name, Some(project_index)) {
             bail!("该分组中项目已存在: {new_name}");
         }
         data.groups[group_index].projects[project_index].name = new_name.to_string();
+    }
+    if let Some(alias) = alias {
+        let alias = alias.trim();
+        if project_label_taken(&data.groups[group_index], alias, Some(project_index)) {
+            bail!("该分组中项目别名已存在: {alias}");
+        }
+        let current_name = data.groups[group_index].projects[project_index]
+            .name
+            .clone();
+        if !alias.is_empty() && alias.eq_ignore_ascii_case(&current_name) {
+            bail!("项目别名不能与项目名相同");
+        }
+        data.groups[group_index].projects[project_index].alias = alias.to_string();
     }
     if let Some(path) = path {
         let path = path.trim();
@@ -303,6 +365,7 @@ fn restore_project(data: &mut ProjectData, item: DeletedItem) -> Result<String> 
     let mut project = Project {
         id: item.id.clone(),
         name,
+        alias: item.alias.clone(),
         path: item.path.clone(),
         wsl_path: item.wsl_path.clone(),
         default_tool: item.default_tool.clone(),
@@ -389,6 +452,7 @@ fn restore_group(data: &mut ProjectData, item: DeletedItem) -> Result<String> {
     }
     data.groups.push(Group {
         name: name.clone(),
+        alias: item.alias.clone(),
         projects,
     });
     if renamed {
@@ -582,10 +646,12 @@ mod tests {
             groups: vec![
                 Group {
                     name: "Work".into(),
+                    alias: String::new(),
                     projects: vec![Project::new("app", r"E:\dev\app", "")],
                 },
                 Group {
                     name: "Personal".into(),
+                    alias: String::new(),
                     projects: vec![Project::new("app", r"E:\personal\app", "")],
                 },
             ],
@@ -601,11 +667,30 @@ mod tests {
     }
 
     #[test]
+    fn find_by_alias() {
+        let mut data = data();
+        data.groups[0].alias = "wk".into();
+        data.groups[0].projects[0].alias = "pcs".into();
+        assert_eq!(find_group(&data, "wk").unwrap(), 0);
+        assert_eq!(find_project(&data, "pcs", Some("wk")).unwrap(), (0, 0));
+        assert_eq!(find_project(&data, "pcs", None).unwrap(), (0, 0));
+        assert!(add_group_with_alias(&mut data, "X", "wk").is_err());
+        assert!(
+            add_project(
+                &mut data,
+                "Work",
+                Project::new("other", r"E:\o", "").with_alias("pcs")
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn group_crud_rejects_duplicates() {
         let mut data = ProjectData::default();
-        add_group(&mut data, "Work").unwrap();
-        assert!(add_group(&mut data, "work").is_err());
-        rename_group(&mut data, "Work", "Personal").unwrap();
+        add_group_with_alias(&mut data, "Work", "").unwrap();
+        assert!(add_group_with_alias(&mut data, "work", "").is_err());
+        rename_group_with_alias(&mut data, "Work", "Personal", None).unwrap();
         assert_eq!(data.groups[0].name, "Personal");
         remove_group(&mut data, "Personal", false).unwrap();
         assert!(data.groups.is_empty());
@@ -615,7 +700,7 @@ mod tests {
     fn project_can_move_and_remove() {
         let mut data = data();
         move_project(&mut data, "app", Some("Work"), "Personal").unwrap_err();
-        add_group(&mut data, "Archive").unwrap();
+        add_group_with_alias(&mut data, "Archive", "").unwrap();
         move_project(&mut data, "app", Some("Work"), "Archive").unwrap();
         assert_eq!(data.groups[0].projects.len(), 0);
         let removed = remove_project(&mut data, "app", Some("Archive"), false).unwrap();
@@ -630,6 +715,7 @@ mod tests {
         ProjectData {
             groups: vec![Group {
                 name: "Work".into(),
+                alias: String::new(),
                 projects: vec![
                     Project {
                         id: "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee".into(),
@@ -669,7 +755,7 @@ mod tests {
         let mut data = id_data();
         remove_project_by_id(&mut data, "aaaaaaaa", None, false).unwrap();
         assert_eq!(data.groups[0].projects.len(), 1);
-        add_group(&mut data, "Archive").unwrap();
+        add_group_with_alias(&mut data, "Archive", "").unwrap();
         move_project_by_id(&mut data, "aaaabbbb", Some("Work"), "Archive").unwrap();
         assert_eq!(data.groups[0].projects.len(), 0);
         assert_eq!(data.groups[1].projects[0].name, "other");
@@ -678,11 +764,12 @@ mod tests {
     #[test]
     fn edit_project_updates_path_and_derived_wsl_path() {
         let mut data = data();
-        edit_project(
+        edit_project_full(
             &mut data,
             "app",
             Some("Work"),
             Some("new-app"),
+            None,
             Some(r"F:\dev\new-app"),
             None,
         )
@@ -697,7 +784,7 @@ mod tests {
         let mut data = data();
         let id = data.groups[0].projects[0].id.clone();
         data.groups[0].projects[0].wsl_path = "/mnt/e/dev/app".into();
-        edit_project(&mut data, "app", Some("Work"), None, Some(""), None).unwrap();
+        edit_project_full(&mut data, "app", Some("Work"), None, None, Some(""), None).unwrap();
         let project = &data.groups[0].projects[0];
         assert_eq!(project.id, id);
         assert_eq!(project.path, "");
@@ -708,7 +795,16 @@ mod tests {
     #[test]
     fn edit_project_can_clear_both_paths() {
         let mut data = data();
-        edit_project(&mut data, "app", Some("Work"), None, Some(""), Some("")).unwrap();
+        edit_project_full(
+            &mut data,
+            "app",
+            Some("Work"),
+            None,
+            None,
+            Some(""),
+            Some(""),
+        )
+        .unwrap();
         let project = &data.groups[0].projects[0];
         assert_eq!(project.path, "");
         assert_eq!(project.wsl_path, "");
@@ -717,10 +813,11 @@ mod tests {
     #[test]
     fn edit_project_derived_wsl_keeps_manual_override() {
         let mut data = data();
-        edit_project(
+        edit_project_full(
             &mut data,
             "app",
             Some("Work"),
+            None,
             None,
             Some(r"F:\dev\app"),
             Some("/custom/path"),
@@ -952,7 +1049,7 @@ mod tests {
     #[test]
     fn restore_project_regenerates_conflicting_id() {
         let mut data = ProjectData::default();
-        add_group(&mut data, "Work").unwrap();
+        add_group_with_alias(&mut data, "Work", "").unwrap();
         let mut project = Project::new("app", r"E:\dev\app", "");
         let id = project.id.clone();
         data.trash
@@ -969,7 +1066,7 @@ mod tests {
     #[test]
     fn restore_group_keeps_project_ids_and_renames_on_conflict() {
         let mut data = ProjectData::default();
-        add_group(&mut data, "Existing").unwrap();
+        add_group_with_alias(&mut data, "Existing", "").unwrap();
         data.groups[0]
             .projects
             .push(Project::new("live", r"E:\live", ""));
@@ -981,7 +1078,7 @@ mod tests {
         let group_id = item.id.clone();
         data.trash.push(item);
         // 恢复前手工创建同名分组
-        add_group(&mut data, "Archive").unwrap();
+        add_group_with_alias(&mut data, "Archive", "").unwrap();
         let message = restore_item(&mut data, &group_id).unwrap();
         assert_eq!(
             message,
@@ -1047,7 +1144,7 @@ mod tests {
     #[test]
     fn restore_project_renames_on_name_conflict() {
         let mut data = ProjectData::default();
-        add_group(&mut data, "Work").unwrap();
+        add_group_with_alias(&mut data, "Work", "").unwrap();
         add_project(&mut data, "Work", Project::new("app", r"E:\app", "")).unwrap();
         let snapshot = DeletedItem::from_project(&data.groups[0].projects[0], "Work", 1);
         data.trash.push(snapshot);
@@ -1062,8 +1159,8 @@ mod tests {
     #[test]
     fn restore_group_suffix_increments_on_repeated_conflict() {
         let mut data = ProjectData::default();
-        add_group(&mut data, "Archive").unwrap();
-        add_group(&mut data, "Archive(恢复)").unwrap();
+        add_group_with_alias(&mut data, "Archive", "").unwrap();
+        add_group_with_alias(&mut data, "Archive(恢复)", "").unwrap();
         let group = Group::new("Archive");
         data.trash.push(DeletedItem::from_group(&group, 1));
         let id = data.trash[0].id.clone();
@@ -1085,7 +1182,7 @@ mod tests {
     #[test]
     fn restore_group_ids_conflict_regenerated() {
         let mut data = ProjectData::default();
-        add_group(&mut data, "Work").unwrap();
+        add_group_with_alias(&mut data, "Work", "").unwrap();
         let existing = Project::new("live", r"E:\live", "");
         data.groups[0].projects.push(existing);
         // 回收站分组里包含与现有项目同 id 的项目

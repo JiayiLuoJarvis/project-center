@@ -6,6 +6,9 @@ pub struct Project {
     #[serde(default)]
     pub id: String,
     pub name: String,
+    /// 可选别名，便于英文过滤 / CLI 查找；空表示无。
+    #[serde(default)]
+    pub alias: String,
     #[serde(default)]
     pub path: String,
     #[serde(rename = "wslPath", default)]
@@ -26,11 +29,17 @@ impl Project {
         Self {
             id: Uuid::new_v4().to_string(),
             name: name.into(),
+            alias: String::new(),
             path: path.into(),
             wsl_path: wsl_path.into(),
             default_tool: String::new(),
             commands: Vec::new(),
         }
+    }
+
+    pub fn with_alias(mut self, alias: impl Into<String>) -> Self {
+        self.alias = alias.into();
+        self
     }
 
     /// 为旧数据中缺失 id 的项目补生成 id。
@@ -95,6 +104,9 @@ impl ProjectCommand {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Group {
     pub name: String,
+    /// 可选别名，便于英文过滤 / CLI 查找；空表示无。
+    #[serde(default)]
+    pub alias: String,
     #[serde(default)]
     pub projects: Vec<Project>,
 }
@@ -103,8 +115,14 @@ impl Group {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            alias: String::new(),
             projects: Vec::new(),
         }
+    }
+
+    pub fn with_alias(mut self, alias: impl Into<String>) -> Self {
+        self.alias = alias.into();
+        self
     }
 }
 
@@ -130,6 +148,8 @@ pub struct DeletedItem {
     #[serde(default)]
     pub group: String,
     pub name: String,
+    #[serde(default)]
+    pub alias: String,
     #[serde(default)]
     pub path: String,
     #[serde(rename = "wslPath", default)]
@@ -162,6 +182,7 @@ impl DeletedItem {
             kind: "project".into(),
             group: group.to_string(),
             name: project.name.clone(),
+            alias: project.alias.clone(),
             path: project.path.clone(),
             wsl_path: project.wsl_path.clone(),
             default_tool: project.default_tool.clone(),
@@ -178,6 +199,7 @@ impl DeletedItem {
             kind: "group".into(),
             group: String::new(),
             name: group.name.clone(),
+            alias: group.alias.clone(),
             path: String::new(),
             wsl_path: String::new(),
             default_tool: String::new(),
@@ -530,6 +552,7 @@ mod tests {
         assert_eq!(item.commands[0].name, "构建");
         let group = Group {
             name: "Archive".into(),
+            alias: String::new(),
             projects: vec![project],
         };
         let item = DeletedItem::from_group(&group, 200);
@@ -606,6 +629,7 @@ mod tests {
 
         let group = Group {
             name: "Archive".into(),
+            alias: String::new(),
             projects: vec![project],
         };
         let item = DeletedItem::from_group(&group, 200);

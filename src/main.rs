@@ -89,6 +89,8 @@ struct AddArgs {
     #[arg(long)]
     group: String,
     #[arg(long)]
+    alias: Option<String>,
+    #[arg(long)]
     dir: Option<PathBuf>,
     #[arg(long = "wsl-path")]
     wsl_path: Option<String>,
@@ -101,6 +103,8 @@ struct EditArgs {
     group: Option<String>,
     #[arg(long)]
     new_name: Option<String>,
+    #[arg(long)]
+    alias: Option<String>,
     #[arg(long)]
     dir: Option<PathBuf>,
     #[arg(long = "wsl-path")]
@@ -150,9 +154,18 @@ enum TrashCommand {
 #[derive(Subcommand)]
 enum GroupCommand {
     #[command(about = "添加分组")]
-    Add { name: String },
+    Add {
+        name: String,
+        #[arg(long)]
+        alias: Option<String>,
+    },
     #[command(about = "重命名分组")]
-    Rename { old_name: String, new_name: String },
+    Rename {
+        old_name: String,
+        new_name: String,
+        #[arg(long)]
+        alias: Option<String>,
+    },
     #[command(about = "删除分组")]
     Rm {
         name: String,
@@ -476,11 +489,11 @@ fn cmd_add(args: AddArgs) -> Result<()> {
         bail!("WSL 路径不能为空");
     }
     let mut data = Store::load();
-    ops::add_project(
-        &mut data,
-        &args.group,
-        Project::new(args.name, path, wsl_path),
-    )?;
+    let mut project = Project::new(args.name, path, wsl_path);
+    if let Some(alias) = args.alias {
+        project.alias = alias.trim().to_string();
+    }
+    ops::add_project(&mut data, &args.group, project)?;
     save(&data)?;
     println!("项目已添加。");
     Ok(())
@@ -493,11 +506,12 @@ fn cmd_edit(args: EditArgs) -> Result<()> {
     let mut data = Store::load();
     let (name, resolved_group) = resolve_project_name(&data, &args.name, args.group.as_deref())?;
     let group = args.group.as_deref().or(resolved_group.as_deref());
-    ops::edit_project(
+    ops::edit_project_full(
         &mut data,
         &name,
         group,
         args.new_name.as_deref(),
+        args.alias.as_deref(),
         path.as_deref(),
         args.wsl_path.as_deref(),
     )?;
@@ -658,12 +672,16 @@ fn cmd_run(args: RunArgs) -> Result<()> {
 fn cmd_group(command: GroupCommand) -> Result<()> {
     let mut data = Store::load();
     match command {
-        GroupCommand::Add { name } => {
-            ops::add_group(&mut data, &name)?;
+        GroupCommand::Add { name, alias } => {
+            ops::add_group_with_alias(&mut data, &name, alias.as_deref().unwrap_or(""))?;
             println!("分组已添加: {name}");
         }
-        GroupCommand::Rename { old_name, new_name } => {
-            ops::rename_group(&mut data, &old_name, &new_name)?;
+        GroupCommand::Rename {
+            old_name,
+            new_name,
+            alias,
+        } => {
+            ops::rename_group_with_alias(&mut data, &old_name, &new_name, alias.as_deref())?;
             println!("分组已重命名: {new_name}");
         }
         GroupCommand::Rm { name, force } => {
@@ -692,6 +710,7 @@ mod tests {
             groups: vec![
                 Group {
                     name: "Work".into(),
+                    alias: String::new(),
                     projects: vec![Project {
                         id: "11111111-0000-0000-0000-000000000000".into(),
                         ..Project::new("app", r"E:\w\app", "")
@@ -699,6 +718,7 @@ mod tests {
                 },
                 Group {
                     name: "Personal".into(),
+                    alias: String::new(),
                     projects: vec![Project {
                         id: "22222222-0000-0000-0000-000000000000".into(),
                         ..Project::new("app", r"E:\p\app", "")
@@ -755,6 +775,7 @@ mod tests {
         ProjectData {
             groups: vec![Group {
                 name: "Work".into(),
+                alias: String::new(),
                 projects: vec![Project {
                     id: "11111111-0000-0000-0000-000000000000".into(),
                     ..Project::new("app", r"E:\w\app", "")
@@ -766,6 +787,7 @@ mod tests {
                     kind: "project".into(),
                     group: "Work".into(),
                     name: "old-app".into(),
+                    alias: String::new(),
                     path: r"E:\old".into(),
                     wsl_path: "/mnt/e/old".into(),
                     default_tool: String::new(),
@@ -778,6 +800,7 @@ mod tests {
                     kind: "group".into(),
                     group: String::new(),
                     name: "Archive".into(),
+                    alias: String::new(),
                     path: String::new(),
                     wsl_path: String::new(),
                     default_tool: String::new(),
@@ -830,6 +853,7 @@ mod tests {
         ProjectData {
             groups: vec![Group {
                 name: "Work".into(),
+                alias: String::new(),
                 projects: vec![Project {
                     id: "11111111-0000-0000-0000-000000000000".into(),
                     commands: vec![

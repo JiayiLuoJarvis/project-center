@@ -252,6 +252,7 @@ mod tests {
         let data = ProjectData {
             groups: vec![Group {
                 name: "Work".into(),
+                alias: String::new(),
                 projects: vec![Project::new("app", r"E:\dev\app", "/mnt/e/dev/app")],
             }],
             ..Default::default()
@@ -303,6 +304,7 @@ mod tests {
         let data = ProjectData {
             groups: vec![Group {
                 name: "G".into(),
+                alias: String::new(),
                 projects: vec![Project::new("x", r"E:\x", "")],
             }],
             ..Default::default()
@@ -341,6 +343,7 @@ mod tests {
         let data = ProjectData {
             groups: vec![Group {
                 name: "Work".into(),
+                alias: String::new(),
                 projects: vec![Project::new("app", r"E:\dev\app", "")],
             }],
             ..Default::default()
@@ -397,6 +400,7 @@ mod tests {
         let data = ProjectData {
             groups: vec![Group {
                 name: "Work".into(),
+                alias: String::new(),
                 projects: vec![Project::new("app", r"E:\dev\app", "")],
             }],
             ..Default::default()
@@ -443,6 +447,7 @@ mod tests {
         let first = ProjectData {
             groups: vec![Group {
                 name: "First".into(),
+                alias: String::new(),
                 projects: vec![Project::new("a", r"E:\a", "")],
             }],
             ..Default::default()
@@ -459,6 +464,7 @@ mod tests {
         let second = ProjectData {
             groups: vec![Group {
                 name: "Second".into(),
+                alias: String::new(),
                 projects: vec![Project::new("b", r"E:\b", "")],
             }],
             ..Default::default()
@@ -489,6 +495,7 @@ mod tests {
         let first = ProjectData {
             groups: vec![Group {
                 name: "First".into(),
+                alias: String::new(),
                 projects: vec![Project::new("a", r"E:\a", "")],
             }],
             ..Default::default()
@@ -498,6 +505,7 @@ mod tests {
         let second = ProjectData {
             groups: vec![Group {
                 name: "Second".into(),
+                alias: String::new(),
                 projects: vec![Project::new("b", r"E:\b", "")],
             }],
             ..Default::default()
@@ -535,6 +543,7 @@ mod tests {
         let data = ProjectData {
             groups: vec![Group {
                 name: "G".into(),
+                alias: String::new(),
                 projects: vec![Project::new("a", r"E:\a", "")],
             }],
             ..Default::default()

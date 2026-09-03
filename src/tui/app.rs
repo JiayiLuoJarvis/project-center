@@ -11,6 +11,13 @@ pub enum Focus {
     Projects,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LeftItem {
+    Group(usize),
+    Trash,
+    Config,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RightPane {
     Projects,
@@ -22,10 +29,6 @@ pub enum RightPane {
 
 #[derive(Clone, Debug)]
 pub enum ListKind {
-    PathType {
-        group: String,
-        name: String,
-    },
     CommandEnv {
         group: String,
         project_id: String,
@@ -102,68 +105,42 @@ pub enum ConfirmKind {
 }
 
 #[derive(Clone, Debug)]
+pub enum FormField {
+    Text { label: String, value: String },
+    Button { label: String },
+}
+
+#[derive(Clone, Debug)]
 pub enum FormKind {
     AddGroup,
     RenameGroup {
         old: String,
     },
-    AddProjectName {
+    AddProject {
         group: String,
-    },
-    AddProjectWsl {
-        group: String,
-        name: String,
     },
     EditProject {
         group: String,
         project_id: String,
         old_name: String,
-        step: u8,
-        name: String,
-        path: String,
-        wsl_path: String,
     },
-    AddCommandName {
+    AddCommand {
         group: String,
         project_id: String,
         env: String,
     },
-    AddCommandText {
-        group: String,
-        project_id: String,
-        name: String,
-        env: String,
-    },
-    EditCommandName {
+    EditCommand {
         group: String,
         project_id: String,
         index: usize,
         env: String,
-        command: String,
     },
-    EditCommandText {
-        group: String,
-        project_id: String,
-        index: usize,
-        name: String,
-        env: String,
-    },
-    AddToolName {
+    AddTool {
         env: ConfigEnv,
     },
-    AddToolCmd {
-        env: ConfigEnv,
-        name: String,
-    },
-    EditToolName {
+    EditTool {
         env: ConfigEnv,
         index: usize,
-        command: String,
-    },
-    EditToolCmd {
-        env: ConfigEnv,
-        index: usize,
-        name: String,
     },
 }
 
@@ -176,6 +153,7 @@ pub enum Mode {
         options: Vec<LaunchOption>,
         labels: Vec<String>,
         selected: usize,
+        filter: String,
     },
     ActionMenu {
         kind: ActionKind,
@@ -188,10 +166,12 @@ pub enum Mode {
         selected: usize,
         kind: ListKind,
     },
-    InlineInput {
-        prompt: String,
-        buffer: String,
+    Form {
+        title: String,
+        fields: Vec<FormField>,
+        focus: usize,
         kind: FormKind,
+        error: Option<String>,
     },
     Confirm {
         message: String,
@@ -206,15 +186,12 @@ pub enum Outcome {
     Continue,
     Quit,
     Launch {
-        project: Project,
+        project: Box<Project>,
         group: String,
         option: LaunchOption,
         exit_after: bool,
     },
-    PickFolder {
-        group: String,
-        name: String,
-    },
+    PickFolder,
 }
 
 pub struct App {
@@ -275,24 +252,42 @@ impl App {
         app
     }
 
-    pub fn left_count(data: &ProjectData) -> usize {
-        data.groups.len() + 2
+    /// 左栏展示项：过滤后的分组下标，末尾固定回收站与配置。
+    pub fn left_items(&self, data: &ProjectData) -> Vec<LeftItem> {
+        let mut items: Vec<LeftItem> = data
+            .groups
+            .iter()
+            .enumerate()
+            .filter(|(_, g)| {
+                if self.focus != Focus::Groups || self.filter.is_empty() {
+                    return true;
+                }
+                self.matches_filter(&g.name) || self.matches_filter(&g.alias)
+            })
+            .map(|(i, _)| LeftItem::Group(i))
+            .collect();
+        items.push(LeftItem::Trash);
+        items.push(LeftItem::Config);
+        items
     }
 
-    pub fn left_is_group(data: &ProjectData, sel: usize) -> Option<usize> {
-        if sel < data.groups.len() {
-            Some(sel)
-        } else {
-            None
+    pub fn left_count(&self, data: &ProjectData) -> usize {
+        self.left_items(data).len()
+    }
+
+    pub fn left_is_group(&self, data: &ProjectData, sel: usize) -> Option<usize> {
+        match self.left_items(data).get(sel) {
+            Some(LeftItem::Group(i)) => Some(*i),
+            _ => None,
         }
     }
 
-    pub fn left_is_trash(data: &ProjectData, sel: usize) -> bool {
-        sel == data.groups.len()
+    pub fn left_is_trash(&self, data: &ProjectData, sel: usize) -> bool {
+        matches!(self.left_items(data).get(sel), Some(LeftItem::Trash))
     }
 
-    pub fn left_is_config(data: &ProjectData, sel: usize) -> bool {
-        sel == data.groups.len() + 1
+    pub fn left_is_config(&self, data: &ProjectData, sel: usize) -> bool {
+        matches!(self.left_items(data).get(sel), Some(LeftItem::Config))
     }
 
     pub fn sync_right_pane(&mut self, data: &ProjectData) {
@@ -302,9 +297,9 @@ impl App {
         ) {
             return;
         }
-        if Self::left_is_trash(data, self.left_sel) {
+        if self.left_is_trash(data, self.left_sel) {
             self.right_pane = RightPane::Trash;
-        } else if Self::left_is_config(data, self.left_sel) {
+        } else if self.left_is_config(data, self.left_sel) {
             if !matches!(self.right_pane, RightPane::ConfigTools { .. }) {
                 self.right_pane = RightPane::ConfigEnvs;
             }
@@ -314,7 +309,7 @@ impl App {
     }
 
     pub fn clamp_selection(&mut self, data: &ProjectData, config: &AppConfig) {
-        let lc = Self::left_count(data).max(1);
+        let lc = self.left_count(data).max(1);
         if self.left_sel >= lc {
             self.left_sel = lc - 1;
         }
@@ -327,7 +322,7 @@ impl App {
     pub fn right_len(&self, data: &ProjectData, config: &AppConfig) -> usize {
         match &self.right_pane {
             RightPane::Projects => {
-                if let Some(gi) = Self::left_is_group(data, self.left_sel) {
+                if let Some(gi) = self.left_is_group(data, self.left_sel) {
                     self.filtered_project_indices(data, gi).len()
                 } else {
                     0
@@ -353,11 +348,12 @@ impl App {
 
     #[cfg(test)]
     pub fn filtered_group_indices(&self, data: &ProjectData) -> Vec<usize> {
-        data.groups
-            .iter()
-            .enumerate()
-            .filter(|(_, g)| self.focus != Focus::Groups || self.matches_filter(&g.name))
-            .map(|(i, _)| i)
+        self.left_items(data)
+            .into_iter()
+            .filter_map(|item| match item {
+                LeftItem::Group(i) => Some(i),
+                _ => None,
+            })
             .collect()
     }
 
@@ -373,8 +369,13 @@ impl App {
                             return true;
                         }
                         self.matches_filter(&p.name)
+                            || self.matches_filter(&p.alias)
                             || self.matches_filter(&p.path)
                             || self.matches_filter(&p.linux_path())
+                            || (!p.id.is_empty()
+                                && p.id
+                                    .get(..self.filter.len())
+                                    .is_some_and(|prefix| self.matches_filter(prefix)))
                     })
                     .map(|(i, _)| i)
                     .collect()
@@ -437,6 +438,52 @@ impl App {
         self.mode = Mode::Browse;
     }
 
+    fn text_field(label: &str, value: impl Into<String>) -> FormField {
+        FormField::Text {
+            label: label.into(),
+            value: value.into(),
+        }
+    }
+
+    fn button_field(label: &str) -> FormField {
+        FormField::Button {
+            label: label.into(),
+        }
+    }
+
+    fn open_form(&mut self, title: impl Into<String>, fields: Vec<FormField>, kind: FormKind) {
+        self.mode = Mode::Form {
+            title: title.into(),
+            fields,
+            focus: 0,
+            kind,
+            error: None,
+        };
+    }
+
+    fn project_form_fields(name: &str, alias: &str, path: &str, wsl_path: &str) -> Vec<FormField> {
+        vec![
+            Self::text_field("项目名", name),
+            Self::text_field("别名", alias),
+            Self::text_field("Windows 路径", path),
+            Self::button_field("浏览文件夹…"),
+            Self::text_field("WSL 路径", wsl_path),
+        ]
+    }
+
+    fn field_value(fields: &[FormField], index: usize) -> String {
+        match fields.get(index) {
+            Some(FormField::Text { value, .. }) => value.clone(),
+            _ => String::new(),
+        }
+    }
+
+    fn set_form_error(&mut self, error: impl Into<String>) {
+        if let Mode::Form { error: slot, .. } = &mut self.mode {
+            *slot = Some(error.into());
+        }
+    }
+
     pub fn open_launch_picker(
         &mut self,
         data: &ProjectData,
@@ -459,6 +506,7 @@ impl App {
             options,
             labels,
             selected: 0,
+            filter: String::new(),
         };
     }
 
@@ -479,7 +527,7 @@ impl App {
             Mode::LaunchPicker { .. } => self.handle_launch_picker(key, data),
             Mode::ActionMenu { .. } => self.handle_action_menu(key, data, config),
             Mode::ListPicker { .. } => self.handle_list_picker(key, data, config),
-            Mode::InlineInput { .. } => self.handle_inline(key, data, config),
+            Mode::Form { .. } => self.handle_form(key, data, config),
             Mode::Confirm { .. } => self.handle_confirm(key, data, config),
             Mode::Filter => self.handle_filter(key, data, config),
             Mode::Help => {
@@ -551,7 +599,7 @@ impl App {
             }
             KeyCode::Char('G') => {
                 if self.focus == Focus::Groups {
-                    self.left_sel = Self::left_count(data).saturating_sub(1);
+                    self.left_sel = self.left_count(data).saturating_sub(1);
                 } else {
                     self.right_sel = self.right_len(data, config).saturating_sub(1);
                 }
@@ -596,14 +644,13 @@ impl App {
 
     fn move_sel(&mut self, delta: i32, data: &ProjectData, config: &AppConfig) {
         if self.focus == Focus::Groups {
-            let n = Self::left_count(data) as i32;
+            let n = self.left_count(data) as i32;
             if n == 0 {
                 return;
             }
             let next = (self.left_sel as i32 + delta).rem_euclid(n) as usize;
             self.left_sel = next;
             self.right_sel = 0;
-            self.filter.clear();
             if matches!(
                 self.right_pane,
                 RightPane::Commands { .. } | RightPane::ConfigTools { .. }
@@ -629,7 +676,7 @@ impl App {
         }
         match self.right_pane.clone() {
             RightPane::Projects => {
-                if let Some(gi) = Self::left_is_group(data, self.left_sel) {
+                if let Some(gi) = self.left_is_group(data, self.left_sel) {
                     let indices = self.filtered_project_indices(data, gi);
                     if let Some(&pi) = indices.get(self.right_sel) {
                         let group = data.groups[gi].name.clone();
@@ -676,7 +723,7 @@ impl App {
 
     fn open_action_menu(&mut self, data: &ProjectData, config: &AppConfig) {
         if self.focus == Focus::Groups {
-            if let Some(gi) = Self::left_is_group(data, self.left_sel) {
+            if let Some(gi) = self.left_is_group(data, self.left_sel) {
                 let name = data.groups[gi].name.clone();
                 let count = data.groups[gi].projects.len();
                 self.mode = Mode::ActionMenu {
@@ -700,7 +747,7 @@ impl App {
         }
         match self.right_pane.clone() {
             RightPane::Projects => {
-                if let Some(gi) = Self::left_is_group(data, self.left_sel) {
+                if let Some(gi) = self.left_is_group(data, self.left_sel) {
                     let indices = self.filtered_project_indices(data, gi);
                     let Some(&pi) = indices.get(self.right_sel) else {
                         self.flash("无选中项目");
@@ -773,14 +820,14 @@ impl App {
 
     fn on_add(&mut self, data: &ProjectData, _config: &AppConfig) {
         if self.focus == Focus::Groups
-            && !Self::left_is_trash(data, self.left_sel)
-            && !Self::left_is_config(data, self.left_sel)
+            && !self.left_is_trash(data, self.left_sel)
+            && !self.left_is_config(data, self.left_sel)
         {
-            self.mode = Mode::InlineInput {
-                prompt: "分组名: ".into(),
-                buffer: String::new(),
-                kind: FormKind::AddGroup,
-            };
+            self.open_form(
+                "新增分组",
+                vec![Self::text_field("分组名", ""), Self::text_field("别名", "")],
+                FormKind::AddGroup,
+            );
             return;
         }
         if self.focus == Focus::Groups {
@@ -789,21 +836,24 @@ impl App {
         }
         match self.right_pane.clone() {
             RightPane::Projects => {
-                if let Some(gi) = Self::left_is_group(data, self.left_sel) {
+                if let Some(gi) = self.left_is_group(data, self.left_sel) {
                     let group = data.groups[gi].name.clone();
-                    self.mode = Mode::InlineInput {
-                        prompt: "项目名: ".into(),
-                        buffer: String::new(),
-                        kind: FormKind::AddProjectName { group },
-                    };
+                    self.open_form(
+                        "新增项目",
+                        Self::project_form_fields("", "", "", ""),
+                        FormKind::AddProject { group },
+                    );
                 }
             }
             RightPane::ConfigTools { env } => {
-                self.mode = Mode::InlineInput {
-                    prompt: "工具名称: ".into(),
-                    buffer: String::new(),
-                    kind: FormKind::AddToolName { env },
-                };
+                self.open_form(
+                    "新增工具",
+                    vec![
+                        Self::text_field("工具名称", ""),
+                        Self::text_field("启动命令（不含参数）", ""),
+                    ],
+                    FormKind::AddTool { env },
+                );
             }
             RightPane::Commands { group, project_id } => {
                 self.mode = Mode::ListPicker {
@@ -826,37 +876,37 @@ impl App {
 
     fn on_edit(&mut self, data: &ProjectData, config: &AppConfig) {
         if self.focus == Focus::Groups {
-            if let Some(gi) = Self::left_is_group(data, self.left_sel) {
+            if let Some(gi) = self.left_is_group(data, self.left_sel) {
                 let old = data.groups[gi].name.clone();
-                self.mode = Mode::InlineInput {
-                    prompt: "新的分组名: ".into(),
-                    buffer: old.clone(),
-                    kind: FormKind::RenameGroup { old },
-                };
+                let alias = data.groups[gi].alias.clone();
+                self.open_form(
+                    "编辑分组",
+                    vec![
+                        Self::text_field("分组名", old.clone()),
+                        Self::text_field("别名", alias),
+                    ],
+                    FormKind::RenameGroup { old },
+                );
             }
             return;
         }
         match self.right_pane.clone() {
             RightPane::Projects => {
-                if let Some(gi) = Self::left_is_group(data, self.left_sel) {
+                if let Some(gi) = self.left_is_group(data, self.left_sel) {
                     let indices = self.filtered_project_indices(data, gi);
                     let Some(&pi) = indices.get(self.right_sel) else {
                         return;
                     };
                     let p = &data.groups[gi].projects[pi];
-                    self.mode = Mode::InlineInput {
-                        prompt: "项目名: ".into(),
-                        buffer: p.name.clone(),
-                        kind: FormKind::EditProject {
+                    self.open_form(
+                        "编辑项目",
+                        Self::project_form_fields(&p.name, &p.alias, &p.path, &p.wsl_path),
+                        FormKind::EditProject {
                             group: data.groups[gi].name.clone(),
                             project_id: p.id.clone(),
                             old_name: p.name.clone(),
-                            step: 0,
-                            name: p.name.clone(),
-                            path: p.path.clone(),
-                            wsl_path: p.wsl_path.clone(),
                         },
-                    };
+                    );
                 }
             }
             RightPane::ConfigTools { env } => {
@@ -865,15 +915,14 @@ impl App {
                     return;
                 };
                 let tool = &env.tools(config)[ti];
-                self.mode = Mode::InlineInput {
-                    prompt: "工具名称: ".into(),
-                    buffer: tool.name.clone(),
-                    kind: FormKind::EditToolName {
-                        env,
-                        index: ti,
-                        command: tool.command.clone(),
-                    },
-                };
+                self.open_form(
+                    "编辑工具",
+                    vec![
+                        Self::text_field("工具名称", tool.name.clone()),
+                        Self::text_field("启动命令", tool.command.clone()),
+                    ],
+                    FormKind::EditTool { env, index: ti },
+                );
             }
             RightPane::Commands { group, project_id } => {
                 let Some(project) = actions::find_project_ref(data, &group, &project_id) else {
@@ -907,7 +956,7 @@ impl App {
 
     fn on_delete(&mut self, data: &ProjectData, config: &AppConfig) {
         if self.focus == Focus::Groups {
-            if let Some(gi) = Self::left_is_group(data, self.left_sel) {
+            if let Some(gi) = self.left_is_group(data, self.left_sel) {
                 let name = data.groups[gi].name.clone();
                 let count = data.groups[gi].projects.len();
                 let message = if count == 0 {
@@ -924,7 +973,7 @@ impl App {
         }
         match self.right_pane.clone() {
             RightPane::Projects => {
-                if let Some(gi) = Self::left_is_group(data, self.left_sel) {
+                if let Some(gi) = self.left_is_group(data, self.left_sel) {
                     let indices = self.filtered_project_indices(data, gi);
                     let Some(&pi) = indices.get(self.right_sel) else {
                         return;
@@ -997,7 +1046,7 @@ impl App {
             self.flash("仅可在项目列表中移动");
             return;
         }
-        let Some(gi) = Self::left_is_group(data, self.left_sel) else {
+        let Some(gi) = self.left_is_group(data, self.left_sel) else {
             return;
         };
         let indices = self.filtered_project_indices(data, gi);
@@ -1045,6 +1094,30 @@ impl App {
         }
     }
 
+    pub fn launch_filter_indices(
+        options: &[LaunchOption],
+        labels: &[String],
+        filter: &str,
+    ) -> Vec<usize> {
+        if filter.is_empty() {
+            return (0..options.len()).collect();
+        }
+        let q = filter.to_lowercase();
+        options
+            .iter()
+            .enumerate()
+            .filter(|(i, opt)| {
+                let label = labels.get(*i).map(|s| s.as_str()).unwrap_or("");
+                label.to_lowercase().contains(&q)
+                    || opt.tool_name.to_lowercase().contains(&q)
+                    || opt.command.to_lowercase().contains(&q)
+                    || opt.env.label().to_lowercase().contains(&q)
+                    || opt.env.short_label().to_lowercase().contains(&q)
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
     fn handle_launch_picker(&mut self, key: KeyEvent, data: &ProjectData) -> Outcome {
         let Mode::LaunchPicker {
             group,
@@ -1052,45 +1125,68 @@ impl App {
             options,
             labels,
             selected,
+            filter,
         } = self.mode.clone()
         else {
             return Outcome::Continue;
         };
+        let indices = Self::launch_filter_indices(&options, &labels, &filter);
+        let set = |filter: String, selected: usize| Mode::LaunchPicker {
+            group: group.clone(),
+            project_id: project_id.clone(),
+            options: options.clone(),
+            labels: labels.clone(),
+            selected,
+            filter,
+        };
         match key.code {
             KeyCode::Esc => {
-                if self.short_session {
+                if !filter.is_empty() {
+                    self.mode = set(String::new(), 0);
+                } else if self.short_session {
                     return Outcome::Quit;
+                } else {
+                    self.back_to_browse();
                 }
-                self.back_to_browse();
+            }
+            KeyCode::Backspace => {
+                let mut filter = filter;
+                filter.pop();
+                self.mode = set(filter, 0);
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                let n = options.len();
+                let n = indices.len();
                 if n > 0 {
-                    let next = (selected + 1) % n;
-                    self.mode = Mode::LaunchPicker {
-                        group,
-                        project_id,
-                        options,
-                        labels,
-                        selected: next,
-                    };
+                    let pos = indices.iter().position(|&i| i == selected).unwrap_or(0);
+                    let next = indices[(pos + 1) % n];
+                    self.mode = set(filter, next);
                 }
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                let n = options.len();
+                let n = indices.len();
                 if n > 0 {
-                    let next = (selected + n - 1) % n;
-                    self.mode = Mode::LaunchPicker {
-                        group,
-                        project_id,
-                        options,
-                        labels,
-                        selected: next,
-                    };
+                    let pos = indices.iter().position(|&i| i == selected).unwrap_or(0);
+                    let next = indices[(pos + n - 1) % n];
+                    self.mode = set(filter, next);
                 }
             }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut filter = filter;
+                filter.push(c);
+                let indices = Self::launch_filter_indices(&options, &labels, &filter);
+                let selected = indices.first().copied().unwrap_or(0);
+                self.mode = set(filter, selected);
+            }
             KeyCode::Enter => {
-                if let Some(option) = options.get(selected).cloned()
+                if indices.is_empty() {
+                    return Outcome::Continue;
+                }
+                let idx = if indices.contains(&selected) {
+                    selected
+                } else {
+                    indices[0]
+                };
+                if let Some(option) = options.get(idx).cloned()
                     && let Some(project) = actions::find_project_ref(data, &group, &project_id)
                 {
                     let exit_after = self.exit_after_launch || self.short_session;
@@ -1098,7 +1194,7 @@ impl App {
                         self.back_to_browse();
                     }
                     return Outcome::Launch {
-                        project: project.clone(),
+                        project: Box::new(project.clone()),
                         group,
                         option,
                         exit_after,
@@ -1167,11 +1263,20 @@ impl App {
                 // group menu
                 match selected {
                     0 => {
-                        self.mode = Mode::InlineInput {
-                            prompt: "新的分组名: ".into(),
-                            buffer: group.clone(),
-                            kind: FormKind::RenameGroup { old: group },
-                        };
+                        let alias = data
+                            .groups
+                            .iter()
+                            .find(|g| g.name.eq_ignore_ascii_case(&group))
+                            .map(|g| g.alias.clone())
+                            .unwrap_or_default();
+                        self.open_form(
+                            "编辑分组",
+                            vec![
+                                Self::text_field("分组名", group.clone()),
+                                Self::text_field("别名", alias),
+                            ],
+                            FormKind::RenameGroup { old: group },
+                        );
                     }
                     1 => {
                         let count = data
@@ -1218,19 +1323,20 @@ impl App {
                 }
                 3 => {
                     if let Some(project) = actions::find_project_ref(data, &group, &project_id) {
-                        self.mode = Mode::InlineInput {
-                            prompt: "项目名: ".into(),
-                            buffer: project.name.clone(),
-                            kind: FormKind::EditProject {
+                        self.open_form(
+                            "编辑项目",
+                            Self::project_form_fields(
+                                &project.name,
+                                &project.alias,
+                                &project.path,
+                                &project.wsl_path,
+                            ),
+                            FormKind::EditProject {
                                 group,
                                 project_id,
                                 old_name: project.name.clone(),
-                                step: 0,
-                                name: project.name.clone(),
-                                path: project.path.clone(),
-                                wsl_path: project.wsl_path.clone(),
                             },
-                        };
+                        );
                     }
                 }
                 4 => {
@@ -1287,15 +1393,14 @@ impl App {
             ActionKind::ConfigTool { env, index } => match selected {
                 0 => {
                     if let Some(tool) = env.tools(config).get(index) {
-                        self.mode = Mode::InlineInput {
-                            prompt: "工具名称: ".into(),
-                            buffer: tool.name.clone(),
-                            kind: FormKind::EditToolName {
-                                env,
-                                index,
-                                command: tool.command.clone(),
-                            },
-                        };
+                        self.open_form(
+                            "编辑工具",
+                            vec![
+                                Self::text_field("工具名称", tool.name.clone()),
+                                Self::text_field("启动命令", tool.command.clone()),
+                            ],
+                            FormKind::EditTool { env, index },
+                        );
                     }
                 }
                 1 => {
@@ -1415,17 +1520,6 @@ impl App {
         config: &mut AppConfig,
     ) -> Outcome {
         match kind {
-            ListKind::PathType { group, name } => {
-                self.back_to_browse();
-                if selected == 0 {
-                    return Outcome::PickFolder { group, name };
-                }
-                self.mode = Mode::InlineInput {
-                    prompt: "WSL 路径: ".into(),
-                    buffer: String::new(),
-                    kind: FormKind::AddProjectWsl { group, name },
-                };
-            }
             ListKind::CommandEnv {
                 group,
                 project_id,
@@ -1443,41 +1537,35 @@ impl App {
                     let cmd = actions::find_project_ref(data, &group, &project_id)
                         .and_then(|p| p.commands.get(index).cloned());
                     if let Some(cmd) = cmd {
-                        self.mode = Mode::InlineInput {
-                            prompt: "命令名称: ".into(),
-                            buffer: name.clone(),
-                            kind: FormKind::EditCommandName {
+                        self.open_form(
+                            "编辑命令",
+                            vec![
+                                Self::text_field("命令名称", name),
+                                Self::text_field("启动命令", cmd.command),
+                            ],
+                            FormKind::EditCommand {
                                 group,
                                 project_id,
                                 index,
                                 env,
-                                command: cmd.command,
                             },
-                        };
+                        );
                     } else {
                         self.back_to_browse();
                     }
-                } else if name.is_empty() {
-                    self.mode = Mode::InlineInput {
-                        prompt: "命令名称: ".into(),
-                        buffer: String::new(),
-                        kind: FormKind::AddCommandName {
-                            group,
-                            project_id,
-                            env,
-                        },
-                    };
                 } else {
-                    self.mode = Mode::InlineInput {
-                        prompt: "启动命令: ".into(),
-                        buffer: String::new(),
-                        kind: FormKind::AddCommandText {
+                    self.open_form(
+                        "新增命令",
+                        vec![
+                            Self::text_field("命令名称", name),
+                            Self::text_field("启动命令", ""),
+                        ],
+                        FormKind::AddCommand {
                             group,
                             project_id,
-                            name,
                             env,
                         },
-                    };
+                    );
                 }
             }
             ListKind::MoveTarget {
@@ -1514,245 +1602,189 @@ impl App {
         Outcome::Continue
     }
 
-    fn handle_inline(
+    fn handle_form(
         &mut self,
         key: KeyEvent,
         data: &mut ProjectData,
         config: &mut AppConfig,
     ) -> Outcome {
-        let Mode::InlineInput {
-            prompt,
-            mut buffer,
+        let Mode::Form {
+            title,
+            mut fields,
+            mut focus,
             kind,
+            ..
         } = self.mode.clone()
         else {
             return Outcome::Continue;
         };
+        if fields.is_empty() {
+            self.back_to_browse();
+            return Outcome::Continue;
+        }
+        focus = focus.min(fields.len() - 1);
+
         match key.code {
             KeyCode::Esc => {
                 self.back_to_browse();
                 return Outcome::Continue;
             }
-            KeyCode::Backspace => {
-                buffer.pop();
-                self.mode = Mode::InlineInput {
-                    prompt,
-                    buffer,
+            KeyCode::Tab | KeyCode::Down => {
+                focus = (focus + 1) % fields.len();
+                self.mode = Mode::Form {
+                    title,
+                    fields,
+                    focus,
                     kind,
+                    error: None,
+                };
+            }
+            KeyCode::BackTab | KeyCode::Up => {
+                focus = (focus + fields.len() - 1) % fields.len();
+                self.mode = Mode::Form {
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    error: None,
+                };
+            }
+            KeyCode::Backspace => {
+                if let Some(FormField::Text { value, .. }) = fields.get_mut(focus) {
+                    value.pop();
+                }
+                self.mode = Mode::Form {
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    error: None,
                 };
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                buffer.push(c);
-                self.mode = Mode::InlineInput {
-                    prompt,
-                    buffer,
+                if let Some(FormField::Text { value, .. }) = fields.get_mut(focus) {
+                    value.push(c);
+                }
+                self.mode = Mode::Form {
+                    title,
+                    fields,
+                    focus,
                     kind,
+                    error: None,
                 };
             }
-            KeyCode::Enter => return self.submit_inline(kind, buffer, data, config),
-            _ => {}
+            KeyCode::Enter => match fields.get(focus) {
+                Some(FormField::Button { .. }) => {
+                    self.mode = Mode::Form {
+                        title,
+                        fields,
+                        focus,
+                        kind,
+                        error: None,
+                    };
+                    return Outcome::PickFolder;
+                }
+                _ => {
+                    self.mode = Mode::Form {
+                        title,
+                        fields: fields.clone(),
+                        focus,
+                        kind: kind.clone(),
+                        error: None,
+                    };
+                    return self.submit_form(kind, &fields, data, config);
+                }
+            },
+            _ => {
+                self.mode = Mode::Form {
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    error: None,
+                };
+            }
         }
         Outcome::Continue
     }
 
-    fn submit_inline(
+    fn submit_form(
         &mut self,
         kind: FormKind,
-        buffer: String,
+        fields: &[FormField],
         data: &mut ProjectData,
         config: &mut AppConfig,
     ) -> Outcome {
-        match kind {
+        let result = match kind {
             FormKind::AddGroup => {
-                self.back_to_browse();
-                match actions::add_group(data, &buffer) {
-                    Ok(msg) => {
-                        self.flash(msg);
-                        self.left_sel = data.groups.len().saturating_sub(1);
-                        self.sync_right_pane(data);
-                    }
-                    Err(e) => self.flash(e),
-                }
+                let name = Self::field_value(fields, 0);
+                let alias = Self::field_value(fields, 1);
+                actions::add_group(data, &name, &alias).inspect(|_| {
+                    self.left_sel = data.groups.len().saturating_sub(1);
+                    self.sync_right_pane(data);
+                })
             }
             FormKind::RenameGroup { old } => {
-                self.back_to_browse();
-                match actions::rename_group(data, &old, &buffer) {
-                    Ok(msg) => self.flash(msg),
-                    Err(e) => self.flash(e),
-                }
+                let name = Self::field_value(fields, 0);
+                let alias = Self::field_value(fields, 1);
+                actions::rename_group(data, &old, &name, &alias)
             }
-            FormKind::AddProjectName { group } => {
-                let name = buffer.trim().to_string();
-                if name.is_empty() {
-                    self.flash("项目名不能为空");
-                    self.back_to_browse();
-                    return Outcome::Continue;
-                }
-                self.mode = Mode::ListPicker {
-                    title: "选择项目位置".into(),
-                    items: vec![
-                        "Windows 路径（选择文件夹）".into(),
-                        "仅 WSL 路径（手动输入）".into(),
-                    ],
-                    selected: 0,
-                    kind: ListKind::PathType { group, name },
-                };
-            }
-            FormKind::AddProjectWsl { group, name } => {
-                self.back_to_browse();
-                match actions::add_project_wsl(data, &group, &name, &buffer) {
-                    Ok(msg) => self.flash(msg),
-                    Err(e) => self.flash(e),
-                }
+            FormKind::AddProject { group } => {
+                let name = Self::field_value(fields, 0);
+                let alias = Self::field_value(fields, 1);
+                let path = Self::field_value(fields, 2);
+                let wsl = Self::field_value(fields, 4);
+                actions::add_project_paths(data, &group, &name, &alias, &path, &wsl)
             }
             FormKind::EditProject {
                 group,
                 project_id,
                 old_name,
-                step,
-                mut name,
-                mut path,
-                mut wsl_path,
-            } => match step {
-                0 => {
-                    name = buffer;
-                    self.mode = Mode::InlineInput {
-                        prompt: "Windows/Linux 路径: ".into(),
-                        buffer: path.clone(),
-                        kind: FormKind::EditProject {
-                            group,
-                            project_id,
-                            old_name,
-                            step: 1,
-                            name,
-                            path,
-                            wsl_path,
-                        },
-                    };
-                }
-                1 => {
-                    path = buffer;
-                    self.mode = Mode::InlineInput {
-                        prompt: "WSL 路径: ".into(),
-                        buffer: wsl_path.clone(),
-                        kind: FormKind::EditProject {
-                            group,
-                            project_id,
-                            old_name,
-                            step: 2,
-                            name,
-                            path,
-                            wsl_path,
-                        },
-                    };
-                }
-                _ => {
-                    wsl_path = buffer;
-                    self.back_to_browse();
-                    match actions::edit_project(data, &group, &old_name, &name, &path, &wsl_path) {
-                        Ok(msg) => self.flash(msg),
-                        Err(e) => self.flash(e),
-                    }
-                    let _ = project_id;
-                }
-            },
-            FormKind::AddCommandName {
+            } => {
+                let name = Self::field_value(fields, 0);
+                let alias = Self::field_value(fields, 1);
+                let path = Self::field_value(fields, 2);
+                let wsl = Self::field_value(fields, 4);
+                let _ = project_id;
+                actions::edit_project(data, &group, &old_name, &name, &alias, &path, &wsl)
+            }
+            FormKind::AddCommand {
                 group,
                 project_id,
                 env,
             } => {
-                self.mode = Mode::InlineInput {
-                    prompt: "启动命令: ".into(),
-                    buffer: String::new(),
-                    kind: FormKind::AddCommandText {
-                        group,
-                        project_id,
-                        name: buffer,
-                        env,
-                    },
-                };
+                let name = Self::field_value(fields, 0);
+                let command = Self::field_value(fields, 1);
+                actions::add_command(data, &project_id, &group, &name, &env, &command)
             }
-            FormKind::AddCommandText {
-                group,
-                project_id,
-                name,
-                env,
-            } => {
-                self.back_to_browse();
-                match actions::add_command(data, &project_id, &group, &name, &env, &buffer) {
-                    Ok(msg) => self.flash(msg),
-                    Err(e) => self.flash(e),
-                }
-            }
-            FormKind::EditCommandName {
+            FormKind::EditCommand {
                 group,
                 project_id,
                 index,
                 env,
-                command,
             } => {
-                self.mode = Mode::InlineInput {
-                    prompt: "启动命令: ".into(),
-                    buffer: command,
-                    kind: FormKind::EditCommandText {
-                        group,
-                        project_id,
-                        index,
-                        name: buffer,
-                        env,
-                    },
-                };
+                let name = Self::field_value(fields, 0);
+                let command = Self::field_value(fields, 1);
+                actions::edit_command(data, &project_id, &group, index, &name, &env, &command)
             }
-            FormKind::EditCommandText {
-                group,
-                project_id,
-                index,
-                name,
-                env,
-            } => {
+            FormKind::AddTool { env } => {
+                let name = Self::field_value(fields, 0);
+                let command = Self::field_value(fields, 1);
+                actions::add_config_tool(config, env, &name, &command)
+            }
+            FormKind::EditTool { env, index } => {
+                let name = Self::field_value(fields, 0);
+                let command = Self::field_value(fields, 1);
+                actions::edit_config_tool(config, env, index, &name, &command)
+            }
+        };
+
+        match result {
+            Ok(msg) => {
                 self.back_to_browse();
-                match actions::edit_command(data, &project_id, &group, index, &name, &env, &buffer)
-                {
-                    Ok(msg) => self.flash(msg),
-                    Err(e) => self.flash(e),
-                }
+                self.flash(msg);
             }
-            FormKind::AddToolName { env } => {
-                self.mode = Mode::InlineInput {
-                    prompt: "启动命令（不含参数）: ".into(),
-                    buffer: String::new(),
-                    kind: FormKind::AddToolCmd { env, name: buffer },
-                };
-            }
-            FormKind::AddToolCmd { env, name } => {
-                self.back_to_browse();
-                match actions::add_config_tool(config, env, &name, &buffer) {
-                    Ok(msg) => self.flash(msg),
-                    Err(e) => self.flash(e),
-                }
-            }
-            FormKind::EditToolName {
-                env,
-                index,
-                command,
-            } => {
-                self.mode = Mode::InlineInput {
-                    prompt: "启动命令: ".into(),
-                    buffer: command,
-                    kind: FormKind::EditToolCmd {
-                        env,
-                        index,
-                        name: buffer,
-                    },
-                };
-            }
-            FormKind::EditToolCmd { env, index, name } => {
-                self.back_to_browse();
-                match actions::edit_config_tool(config, env, index, &name, &buffer) {
-                    Ok(msg) => self.flash(msg),
-                    Err(e) => self.flash(e),
-                }
-            }
+            Err(e) => self.set_form_error(e),
         }
         Outcome::Continue
     }
@@ -1871,20 +1903,50 @@ impl App {
         Outcome::Continue
     }
 
-    pub fn resume_after_folder_pick(
-        &mut self,
-        data: &mut ProjectData,
-        group: &str,
-        name: &str,
-        path: Option<String>,
-    ) {
-        self.back_to_browse();
+    pub fn resume_after_folder_pick(&mut self, path: Option<String>) {
+        let Mode::Form {
+            title,
+            mut fields,
+            focus,
+            kind,
+            ..
+        } = self.mode.clone()
+        else {
+            return;
+        };
         match path {
-            Some(path) => match actions::add_project_win(data, group, name, &path) {
-                Ok(msg) => self.flash(msg),
-                Err(e) => self.flash(e),
-            },
-            None => self.flash("已取消新增项目"),
+            Some(path) => {
+                // 项目表单：0 名 1 别名 2 Windows 路径 3 浏览 4 WSL
+                if let Some(FormField::Text { value, .. }) = fields.get_mut(2) {
+                    *value = path.clone();
+                }
+                let wsl_empty = matches!(
+                    fields.get(4),
+                    Some(FormField::Text { value, .. }) if value.trim().is_empty()
+                );
+                if wsl_empty {
+                    let linux = crate::models::win_path_to_linux(&path);
+                    if let Some(FormField::Text { value, .. }) = fields.get_mut(4) {
+                        *value = linux;
+                    }
+                }
+                self.mode = Mode::Form {
+                    title,
+                    fields,
+                    focus: 2,
+                    kind,
+                    error: None,
+                };
+            }
+            None => {
+                self.mode = Mode::Form {
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    error: Some("已取消选择文件夹".into()),
+                };
+            }
         }
     }
 }
@@ -1903,10 +1965,12 @@ mod tests {
             groups: vec![
                 Group {
                     name: "dev".into(),
+                    alias: String::new(),
                     projects: vec![Project::new("pcs", r"E:\pcs", "")],
                 },
                 Group {
                     name: "tools".into(),
+                    alias: String::new(),
                     projects: vec![],
                 },
             ],
@@ -1975,5 +2039,86 @@ mod tests {
         assert_eq!(app.focus, Focus::Groups);
         app.handle(key(KeyCode::Tab), &mut data, &mut config);
         assert_eq!(app.focus, Focus::Projects);
+    }
+
+    #[test]
+    fn add_project_opens_form_and_keeps_error() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.left_sel = 0;
+        app.sync_right_pane(&data);
+        app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
+        assert!(matches!(
+            app.mode,
+            Mode::Form {
+                kind: FormKind::AddProject { .. },
+                ..
+            }
+        ));
+        app.handle(key(KeyCode::Enter), &mut data, &mut config);
+        match &app.mode {
+            Mode::Form { error, .. } => {
+                assert!(error.as_ref().is_some_and(|e| e.contains("项目名")));
+            }
+            other => panic!("expected form with error, got {other:?}"),
+        }
+        assert_eq!(data.groups[0].projects.len(), 1);
+    }
+
+    #[test]
+    fn launch_picker_filters_by_typing() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.left_sel = 0;
+        app.sync_right_pane(&data);
+        app.right_sel = 0;
+        app.handle(key(KeyCode::Enter), &mut data, &mut config);
+        assert!(matches!(app.mode, Mode::LaunchPicker { .. }));
+        app.handle(key(KeyCode::Char('w')), &mut data, &mut config);
+        app.handle(key(KeyCode::Char('s')), &mut data, &mut config);
+        match &app.mode {
+            Mode::LaunchPicker {
+                filter,
+                options,
+                labels,
+                selected,
+                ..
+            } => {
+                assert_eq!(filter, "ws");
+                let indices = App::launch_filter_indices(options, labels, filter);
+                assert!(!indices.is_empty());
+                assert!(indices.contains(selected));
+            }
+            other => panic!("expected launch picker, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn form_tab_moves_focus_to_browse_button() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.left_sel = 0;
+        app.sync_right_pane(&data);
+        app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
+        app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        match &app.mode {
+            Mode::Form { focus, fields, .. } => {
+                assert_eq!(*focus, 3);
+                assert!(matches!(fields[*focus], FormField::Button { .. }));
+            }
+            other => panic!("expected form, got {other:?}"),
+        }
+        assert!(matches!(
+            app.handle(key(KeyCode::Enter), &mut data, &mut config),
+            Outcome::PickFolder
+        ));
     }
 }

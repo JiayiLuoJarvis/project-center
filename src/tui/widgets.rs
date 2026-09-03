@@ -14,6 +14,13 @@ pub fn project_item(project: &Project, config: &AppConfig) -> ListItem<'static> 
         project.linux_path()
     };
     let mut name_spans = vec![Span::styled(project.name.clone(), theme::base())];
+    if !project.alias.trim().is_empty() {
+        name_spans.push(Span::raw(" "));
+        name_spans.push(Span::styled(
+            format!("[{}]", project.alias.trim()),
+            theme::muted(),
+        ));
+    }
     if project.has_default_tool() {
         name_spans.push(Span::raw(" "));
         name_spans.push(Span::styled("★", theme::success()));
@@ -61,6 +68,11 @@ pub fn help_lines() -> Vec<Line<'static>> {
         Line::from("a  新增   e  编辑   d  删除   m  移动"),
         Line::from("/  过滤   Esc  清过滤/返回"),
         Line::from("g/G  顶/底   ?  帮助   q/Ctrl+C  退出"),
+        Line::from(""),
+        Line::from("表单: Tab 切换字段  Enter 提交  Esc 取消"),
+        Line::from("项目表单可选「浏览文件夹…」填 Windows 路径"),
+        Line::from("启动方式: 直接输入过滤  j/k 移动  Esc 清过滤/返回"),
+        Line::from("别名: 分组/项目可设 alias，过滤与 CLI 可用"),
         Line::from(""),
         Line::from("回收站: r 恢复  D 清空"),
         Line::from("配置: Enter 进入环境工具列表"),
