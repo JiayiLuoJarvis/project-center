@@ -82,7 +82,7 @@ loop {
     }
   }
 }
-ratatui::restore()  // 仅 q / Ctrl+C / 致命错误时离开进程
+ratatui::restore()  // 仅确认退出（q/Ctrl+C → y）/ 致命错误时离开进程
 ```
 
 约束：
@@ -118,7 +118,7 @@ crossterm 在 Windows 上对同一物理键会送达 **Press + Release**（有�
 
 1. 事件循环只处理 `Event::Key`，且 **`key.kind == KeyEventKind::Press`**（`Repeat` 是否当作移动由实现定，默认忽略 Repeat，避免长按连跳失控；若手感需要可对 `j/k` 等导航键单独接受 Repeat）。
 2. `KeyEventKind::Release` **一律忽略**。
-3. 修饰键：`Ctrl+C` 视为退出（与 `q` 相同 outcome），在 raw mode 下自行处理，不依赖进程默认 SIGINT 行为。
+3. 修饰键：`Ctrl+C` 与 Browse 下的 `q` 先进入退出二次确认（`quit_confirm` 覆盖层，见 `2026-09-03-quit-confirm-design.md`）；确认后 outcome 为 Quit。在 raw mode 下自行处理，不依赖进程默认 SIGINT 行为。
 4. 本条写入实现检查清单；漏做会导致 `j`/`q`/`Enter` 双触发，验收不合格。
 
 ## 4. 视觉设计（方向 1 · Lazygit 工作台）
@@ -187,7 +187,7 @@ Browse
   ├─ 需要单选列表的步骤    → ListPicker（见 §5.8）
   ├─ d 等破坏操作          → Confirm
   ├─ ?                     → Help
-  ├─ q / Ctrl+C            → Quit
+  ├─ q / Ctrl+C            → 退出确认（quit_confirm）；y/q/Ctrl+C 确认 → Quit；其它取消
   └─ Esc                   → 清过滤 / 关 Help；不作退出
 
 左栏选中「回收站」「配置」时仍为 Browse，右栏数据源与标题切换（§5.9 / §5.11）。
@@ -200,7 +200,7 @@ Browse
 | WSL / PowerShell（有 child，需 wait） | `restore` → `spawn_direct` → `wait_direct` → **`init` 回到 Browse** | **不退出** |
 | IDE / explorer（detached，无 wait） | `spawn_direct`（可先 restore 再 init，或保持 raw 若实测无干扰）→ **留在 Browse** | **不退出** |
 | `pcs open` 无标志短会话确认启动 | 与上表相同类型语义；短会话在 wait/spawn 完成后 **进程退出**（短会话本就无 Browse 可回） | 短会话退出 |
-| `q` / `Ctrl+C` | `restore` | 退出 |
+| `q` / `Ctrl+C` → 确认 | `restore` | 退出 |
 
 说明：
 
@@ -228,7 +228,7 @@ Browse
 | `/` | 过滤当前栏（§5.10） |
 | `g` / `G` | 到顶 / 到底 |
 | `?` | 帮助 |
-| `q` / `Ctrl+C` | 退出 |
+| `q` / `Ctrl+C` | 退出二次确认（`quit_confirm`）；再 `y`/`q`/`Ctrl+C` 退出；`Esc`/`n`/其它取消且 Mode 不变。详见 `2026-09-03-quit-confirm-design.md` |
 | `Esc` | 若有过滤：清除过滤；若 Help 开：关闭；**不**作为退出键 |
 
 ### 5.4 LaunchPicker
@@ -246,8 +246,8 @@ Browse
 
 ### 5.6 Confirm
 
-- 底栏或小卡片：`确认…？ y/N`，仅 `y`/`Y` 执行；其它键（含 `n`/`N`/`Esc`）取消。
-- 危险操作文案用危险色。
+- **居中小弹窗**（非底栏）：边框危险色、标题「确认」、正文 `确认…？`、底部 `[y/N]`。仅 `y`/`Y` 执行；其它键（含 `n`/`N`/`Esc`/`Enter`）取消。
+- 危险操作文案用危险色。退出确认（`quit_confirm`）复用同一弹窗绘制，叠在当前 Mode 之上。
 
 ### 5.7 ActionMenu
 

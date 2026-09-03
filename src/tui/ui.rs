@@ -1,5 +1,5 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
@@ -45,7 +45,7 @@ pub fn render(frame: &mut Frame, app: &App, data: &ProjectData, config: &AppConf
             ..
         } => render_modal_list(frame, area, title, items, *selected),
         Mode::Help => render_help(frame, area),
-        Mode::Confirm { message, .. } => render_confirm(frame, chunks[2], message),
+        Mode::Confirm { message, .. } => render_confirm(frame, area, message),
         Mode::Form {
             title,
             fields,
@@ -55,6 +55,10 @@ pub fn render(frame: &mut Frame, app: &App, data: &ProjectData, config: &AppConf
         } => render_form(frame, area, title, fields, *focus, error.as_deref()),
         Mode::Filter => render_input(frame, chunks[2], "/", &app.filter, true),
         Mode::Browse => {}
+    }
+
+    if app.quit_confirm {
+        render_confirm(frame, area, "确认退出？");
     }
 }
 
@@ -384,17 +388,58 @@ fn render_help(frame: &mut Frame, area: Rect) {
     );
 }
 
+fn display_width(s: &str) -> u16 {
+    s.chars()
+        .map(|ch| if ch.is_ascii() { 1u16 } else { 2 })
+        .sum()
+}
+
+fn confirm_area(area: Rect, message: &str) -> Rect {
+    let content = display_width(message).max(display_width("[y/N]")).max(8);
+    let w = (content.saturating_add(4)).max(24).min(area.width.max(24));
+    let w = w.min(area.width);
+    let h = 7u16.min(area.height.max(5)).min(area.height);
+    let x = area.x + area.width.saturating_sub(w) / 2;
+    let y = area.y + area.height.saturating_sub(h) / 2;
+    Rect::new(x, y, w, h)
+}
+
 fn render_confirm(frame: &mut Frame, area: Rect, message: &str) {
-    let line = Line::from(vec![
-        Span::styled(format!(" {message} "), theme::danger()),
-        Span::styled(
+    let area = confirm_area(area, message);
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .title(Span::styled(" 确认 ", theme::title()))
+        .borders(Borders::ALL)
+        .border_style(theme::danger())
+        .style(theme::panel());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+            Constraint::Min(1),
+        ])
+        .split(inner);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(message, theme::danger())))
+            .alignment(Alignment::Center)
+            .style(theme::panel()),
+        chunks[1],
+    );
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(
             "[y/N]",
             Style::default()
                 .fg(theme::ACCENT)
                 .add_modifier(Modifier::BOLD),
-        ),
-    ]);
-    frame.render_widget(Paragraph::new(line).style(theme::base()), area);
+        )))
+        .alignment(Alignment::Center)
+        .style(theme::panel()),
+        chunks[2],
+    );
 }
 
 fn render_form(

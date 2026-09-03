@@ -67,7 +67,7 @@ pub fn help_lines() -> Vec<Line<'static>> {
         Line::from("Enter   打开/确认    o  操作菜单"),
         Line::from("a  新增   e  编辑   d  删除   m  移动"),
         Line::from("/  过滤   Esc  清过滤/返回"),
-        Line::from("g/G  顶/底   ?  帮助   q/Ctrl+C  退出"),
+        Line::from("g/G  顶/底   ?  帮助   q/Ctrl+C  退出（确认）"),
         Line::from(""),
         Line::from("表单: Tab 切换字段  Enter 提交  Esc 取消"),
         Line::from("项目表单可选「浏览文件夹…」填 Windows 路径"),

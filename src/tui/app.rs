@@ -204,6 +204,7 @@ pub struct App {
     pub flash: Option<String>,
     pub exit_after_launch: bool,
     pub short_session: bool,
+    pub quit_confirm: bool,
 }
 
 impl App {
@@ -218,6 +219,7 @@ impl App {
             flash: None,
             exit_after_launch: false,
             short_session: false,
+            quit_confirm: false,
         };
         app.sync_right_pane(data);
         app
@@ -537,10 +539,30 @@ impl App {
         config: &mut AppConfig,
     ) -> Outcome {
         self.clear_flash();
-        if key.modifiers.contains(KeyModifiers::CONTROL)
-            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'))
-        {
-            return Outcome::Quit;
+        let ctrl_c = key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C'));
+        if self.quit_confirm {
+            return match key.code {
+                KeyCode::Char('y')
+                | KeyCode::Char('Y')
+                | KeyCode::Char('q')
+                | KeyCode::Char('Q') => {
+                    self.quit_confirm = false;
+                    Outcome::Quit
+                }
+                _ if ctrl_c => {
+                    self.quit_confirm = false;
+                    Outcome::Quit
+                }
+                _ => {
+                    self.quit_confirm = false;
+                    Outcome::Continue
+                }
+            };
+        }
+        if ctrl_c {
+            self.quit_confirm = true;
+            return Outcome::Continue;
         }
         match self.mode.clone() {
             Mode::Browse => self.handle_browse(key, data, config),
@@ -569,7 +591,10 @@ impl App {
         config: &mut AppConfig,
     ) -> Outcome {
         match key.code {
-            KeyCode::Char('q') => return Outcome::Quit,
+            KeyCode::Char('q') | KeyCode::Char('Q') => {
+                self.quit_confirm = true;
+                return Outcome::Continue;
+            }
             KeyCode::Char('?') => {
                 self.mode = Mode::Help;
                 return Outcome::Continue;
@@ -1993,6 +2018,12 @@ mod tests {
         }
     }
 
+    fn ctrl_c() -> KeyEvent {
+        let mut ev = key(KeyCode::Char('c'));
+        ev.modifiers = KeyModifiers::CONTROL;
+        ev
+    }
+
     #[test]
     fn quit_on_q() {
         let mut data = sample();
@@ -2000,8 +2031,14 @@ mod tests {
         let mut app = App::new(&data);
         assert!(matches!(
             app.handle(key(KeyCode::Char('q')), &mut data, &mut config),
+            Outcome::Continue
+        ));
+        assert!(app.quit_confirm);
+        assert!(matches!(
+            app.handle(key(KeyCode::Char('y')), &mut data, &mut config),
             Outcome::Quit
         ));
+        assert!(!app.quit_confirm);
     }
 
     #[test]
@@ -2009,10 +2046,76 @@ mod tests {
         let mut data = sample();
         let mut config = AppConfig::defaults();
         let mut app = App::new(&data);
-        let mut ev = key(KeyCode::Char('c'));
-        ev.modifiers = KeyModifiers::CONTROL;
         assert!(matches!(
-            app.handle(ev, &mut data, &mut config),
+            app.handle(ctrl_c(), &mut data, &mut config),
+            Outcome::Continue
+        ));
+        assert!(app.quit_confirm);
+        assert!(matches!(
+            app.handle(ctrl_c(), &mut data, &mut config),
+            Outcome::Quit
+        ));
+    }
+
+    #[test]
+    fn quit_confirm_cancel_keeps_mode() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.mode = Mode::Confirm {
+            message: "确认清空回收站？ y/N".into(),
+            kind: ConfirmKind::EmptyTrash,
+        };
+        app.handle(ctrl_c(), &mut data, &mut config);
+        assert!(app.quit_confirm);
+        assert!(matches!(
+            app.handle(key(KeyCode::Esc), &mut data, &mut config),
+            Outcome::Continue
+        ));
+        assert!(!app.quit_confirm);
+        assert!(matches!(
+            app.mode,
+            Mode::Confirm {
+                kind: ConfirmKind::EmptyTrash,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn help_q_closes_without_quit_confirm() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.mode = Mode::Help;
+        assert!(matches!(
+            app.handle(key(KeyCode::Char('q')), &mut data, &mut config),
+            Outcome::Continue
+        ));
+        assert!(!app.quit_confirm);
+        assert!(matches!(app.mode, Mode::Browse));
+    }
+
+    #[test]
+    fn filter_q_is_literal() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.mode = Mode::Filter;
+        app.handle(key(KeyCode::Char('q')), &mut data, &mut config);
+        assert_eq!(app.filter, "q");
+        assert!(!app.quit_confirm);
+        assert!(matches!(app.mode, Mode::Filter));
+    }
+
+    #[test]
+    fn quit_confirm_second_q_quits() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.handle(key(KeyCode::Char('q')), &mut data, &mut config);
+        assert!(matches!(
+            app.handle(key(KeyCode::Char('q')), &mut data, &mut config),
             Outcome::Quit
         ));
     }
