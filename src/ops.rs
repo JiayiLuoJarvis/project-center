@@ -169,11 +169,9 @@ pub fn edit_project(
     }
     if let Some(path) = path {
         let path = path.trim();
-        if path.is_empty() {
-            bail!("项目路径不能为空");
-        }
         data.groups[group_index].projects[project_index].path = path.to_string();
-        if wsl_path.is_none() {
+        // 路径留空视为清除 Windows 路径（转为 WSL-only）；仅非空路径且未显式给 wsl_path 时自动推导。
+        if !path.is_empty() && wsl_path.is_none() {
             data.groups[group_index].projects[project_index].wsl_path = win_path_to_linux(path);
         }
     }
@@ -692,6 +690,45 @@ mod tests {
         let project = &data.groups[0].projects[0];
         assert_eq!(project.name, "new-app");
         assert_eq!(project.wsl_path, "/mnt/f/dev/new-app");
+    }
+
+    #[test]
+    fn edit_project_can_clear_windows_path_keeping_wsl() {
+        let mut data = data();
+        let id = data.groups[0].projects[0].id.clone();
+        data.groups[0].projects[0].wsl_path = "/mnt/e/dev/app".into();
+        edit_project(&mut data, "app", Some("Work"), None, Some(""), None).unwrap();
+        let project = &data.groups[0].projects[0];
+        assert_eq!(project.id, id);
+        assert_eq!(project.path, "");
+        assert_eq!(project.wsl_path, "/mnt/e/dev/app");
+        assert!(!project.has_windows_path());
+    }
+
+    #[test]
+    fn edit_project_can_clear_both_paths() {
+        let mut data = data();
+        edit_project(&mut data, "app", Some("Work"), None, Some(""), Some("")).unwrap();
+        let project = &data.groups[0].projects[0];
+        assert_eq!(project.path, "");
+        assert_eq!(project.wsl_path, "");
+    }
+
+    #[test]
+    fn edit_project_derived_wsl_keeps_manual_override() {
+        let mut data = data();
+        edit_project(
+            &mut data,
+            "app",
+            Some("Work"),
+            None,
+            Some(r"F:\dev\app"),
+            Some("/custom/path"),
+        )
+        .unwrap();
+        let project = &data.groups[0].projects[0];
+        assert_eq!(project.path, r"F:\dev\app");
+        assert_eq!(project.wsl_path, "/custom/path");
     }
 
     #[test]

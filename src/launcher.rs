@@ -76,11 +76,12 @@ fn set_console_title(project: &Project, group_name: &str) {
 fn wsl_args(linux: &str, command: &str) -> Vec<String> {
     let mut args = vec!["--cd".to_string(), linux.to_string()];
     if !command.trim().is_empty() {
-        // `-e bash -lc` 而非 `-- <cmd>`：后者会把整条命令当单个可执行名（
+        // `-e bash -lic` 而非 `-- <cmd>`：后者会把整条命令当单个可执行名（
         // 含空格/管道/引号的命令会报 command not found），bash 会正确重新解析。
+        // `-i` 加载完整 `.bashrc`（nvm/fnm/cargo 等 PATH），与手动打开 WSL 终端一致。
         args.push("-e".to_string());
         args.push("bash".to_string());
-        args.push("-lc".to_string());
+        args.push("-lic".to_string());
         args.push(command.to_string());
     }
     args
@@ -229,7 +230,7 @@ mod tests {
         );
         assert_eq!(
             wsl_args("/mnt/e/dev/app", "opencode"),
-            vec!["--cd", "/mnt/e/dev/app", "-e", "bash", "-lc", "opencode"]
+            vec!["--cd", "/mnt/e/dev/app", "-e", "bash", "-lic", "opencode"]
         );
         assert_eq!(
             wsl_args("/mnt/e/dev/app", "make build && npm run dev"),
@@ -238,7 +239,7 @@ mod tests {
                 "/mnt/e/dev/app",
                 "-e",
                 "bash",
-                "-lc",
+                "-lic",
                 "make build && npm run dev"
             ]
         );

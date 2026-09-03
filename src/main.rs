@@ -4,6 +4,7 @@ mod menu;
 mod models;
 mod ops;
 mod store;
+mod tui;
 
 use std::path::PathBuf;
 
@@ -204,7 +205,7 @@ fn main() -> Result<()> {
     match cli.command {
         None | Some(Command::Menu) => {
             let mut data = Store::load();
-            menu::run(&mut data, &mut config)
+            tui::run(&mut data, &mut config)
         }
         Some(Command::Ls { group, json }) => cmd_ls(group.as_deref(), json),
         Some(Command::Open(args)) => cmd_open(args),
@@ -330,15 +331,9 @@ fn cmd_open(args: OpenArgs) -> Result<()> {
         }
         return Ok(());
     }
-    let Some(option) = menu::choose_launch_option(&project, &config)? else {
-        return Ok(());
-    };
-    let child = launcher::spawn_direct(&project, &group_name, option.env, &option.command)
-        .map_err(anyhow::Error::msg)?;
-    if let Some(child) = child {
-        launcher::wait_direct(child).map_err(anyhow::Error::msg)?;
-    }
-    Ok(())
+    let mut data = Store::load();
+    let mut config = Config::load();
+    tui::choose_launch(&mut data, &mut config, &group_name, &project.id)
 }
 
 fn cmd_direct(selector: &ProjectSelector, env: LaunchEnv) -> Result<()> {
@@ -578,13 +573,8 @@ fn cmd_trash(command: TrashCommand) -> Result<()> {
             println!("{message}");
         }
         TrashCommand::Empty { force } => {
-            if !force
-                && !dialoguer::Confirm::with_theme(&dialoguer::theme::ColorfulTheme::default())
-                    .with_prompt("确认清空回收站？")
-                    .default(false)
-                    .interact()?
-            {
-                return Ok(());
+            if !force {
+                bail!("清空回收站需指定 --force，例如: pcs trash empty --force");
             }
             let mut data = Store::load();
             ops::empty_trash(&mut data);

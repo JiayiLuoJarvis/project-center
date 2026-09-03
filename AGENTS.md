@@ -12,8 +12,8 @@
 
 ## Runtime
 
-- `pcs` / `pcs menu` and `pcs open <name>` without `-w|-p|-c` are interactive `dialoguer` menus requiring a real Windows Terminal/conhost.
-- Dialog-free, scriptable commands: `ls`, `path`, `wslpath`, `group ...`, `add`/`edit`/`rm`/`mv` given explicit paths, and `open`/`wsl`/`ps`/`code` with an explicit flag. `add` opens the native `rfd` folder picker only when neither `--dir` nor `--wsl-path` is given. Avoid dialog-based commands in non-interactive verification.
+- `pcs` / `pcs menu` and `pcs open <name>` without `-w|-p|-c` are interactive **ratatui** fullscreen TUI (alternate screen) requiring a real Windows Terminal/conhost. Only `KeyEventKind::Press` is handled (Windows double-fire). Launch: WSL/PS restore→wait→re-enter TUI; IDE/explorer stay in TUI. `q`/`Ctrl+C` restore and exit.
+- Dialog-free, scriptable commands: `ls`, `path`, `wslpath`, `group ...`, `add`/`edit`/`rm`/`mv` given explicit paths, and `open`/`wsl`/`ps`/`code` with an explicit flag. `add` opens the native `rfd` folder picker only when neither `--dir` nor `--wsl-path` is given. `pcs trash empty` requires `--force`. Avoid TUI/rfd commands in non-interactive verification.
 - Launching uses installed `wsl.exe`, `powershell.exe`, and `cmd /c code` / `cmd /c cursor`. WSL/PowerShell run in the current console and the launcher waits for the child to exit while suppressing Ctrl+C (`SetConsoleCtrlHandler`); do not revert this to spawn-and-return. VS Code/Cursor spawn quietly.
 - The usual deployment target is `E:\dev_tool\pcs\pcs.exe`; copy the release binary there only when deployment is requested.
 
@@ -33,8 +33,10 @@
 ## Module Boundaries
 
 - `src/main.rs`: clap definitions and CLI dispatch.
-- `src/menu.rs`: interactive CRUD, two-level launch choice (environment → tool: opencode/cursor-agent/terminal/vscode/cursor), confirmation, and menu saves.
+- `src/menu.rs`: pure launch-option helpers (`LaunchOption` / `build_launch_options` / `default_first`) shared by TUI and tests.
+- `src/tui/`: ratatui UI (`mod` lifecycle, `app` state machine, `ui`/`theme`/`widgets`, `actions` → ops/store/config).
 - `src/ops.rs`: pure CRUD and unambiguous name/id lookup.
 - `src/models.rs`: data model, legacy serialization, and path conversion.
 - `src/store.rs`: JSON loading, id backfill, and atomic persistence.
 - `src/launcher.rs`: WSL, PowerShell, and VS Code/Cursor process launching.
+- `src/config.rs`: exe-dir `config.json` tools lists.

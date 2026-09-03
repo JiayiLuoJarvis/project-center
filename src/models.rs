@@ -303,6 +303,12 @@ pub fn is_linux_path(p: &str) -> bool {
     normalize(p).starts_with('/')
 }
 
+/// WSL 路径校验：接受 `/...`、`~`、`~/...`。
+pub fn is_wsl_path(p: &str) -> bool {
+    let t = normalize(p);
+    is_linux_path(&t) || t == "~" || t.starts_with("~/")
+}
+
 /// `/mnt/e/dev/foo` -> `E:\dev\foo`；不匹配返回 None。
 #[allow(dead_code)]
 pub fn linux_path_to_win(p: &str) -> Option<String> {
@@ -354,6 +360,15 @@ mod tests {
         assert!(is_linux_path("/mnt/e/foo"));
         assert!(!is_linux_path(r"E:\dev\foo"));
         assert!(!is_linux_path(""));
+    }
+
+    #[test]
+    fn is_wsl_path_accepts_tilde() {
+        assert!(is_wsl_path("/mnt/e/foo"));
+        assert!(is_wsl_path("~/dev/foo"));
+        assert!(is_wsl_path("~"));
+        assert!(!is_wsl_path(r"E:\dev\foo"));
+        assert!(!is_wsl_path(""));
     }
 
     #[test]

@@ -1,0 +1,267 @@
+use crate::config::{AppConfig, Config, ConfigEnv, add_tool, edit_tool, remove_tool, reset_config};
+use crate::menu::{LaunchOption, build_launch_options, default_first};
+use crate::models::{Project, ProjectData, format_date, is_wsl_path, normalize, win_path_to_linux};
+use crate::ops;
+use crate::store::Store;
+
+pub fn save_data(data: &ProjectData) -> Result<(), String> {
+    if Store::save(data) {
+        Ok(())
+    } else {
+        Err("保存数据失败".into())
+    }
+}
+
+pub fn save_config(config: &AppConfig) -> Result<(), String> {
+    if Config::save(config) {
+        Ok(())
+    } else {
+        Err("无法写入 config.json".into())
+    }
+}
+
+pub fn trash_label(item: &crate::models::DeletedItem) -> String {
+    if item.is_group() {
+        format!("[分组] {} ({} 个项目)", item.name, item.projects.len())
+    } else {
+        format!(
+            "[项目] {}/{} (删除于 {})",
+            item.group,
+            item.name,
+            format_date(item.deleted_at)
+        )
+    }
+}
+
+pub fn command_label(command: &crate::models::ProjectCommand) -> String {
+    format!(
+        "{} ({} {})",
+        command.name,
+        crate::launcher::LaunchEnv::from_command_env(&command.env).short_label(),
+        command.command
+    )
+}
+
+pub fn launch_labels(project: &Project, config: &AppConfig) -> (Vec<LaunchOption>, Vec<String>) {
+    default_first(build_launch_options(project, config), project)
+}
+
+pub fn add_group(data: &mut ProjectData, name: &str) -> Result<String, String> {
+    ops::add_group(data, name).map_err(|e| e.to_string())?;
+    save_data(data)?;
+    Ok(format!("分组已添加: {}", name.trim()))
+}
+
+pub fn rename_group(data: &mut ProjectData, old: &str, new: &str) -> Result<String, String> {
+    ops::rename_group(data, old, new).map_err(|e| e.to_string())?;
+    save_data(data)?;
+    Ok(format!("分组已重命名: {}", new.trim()))
+}
+
+pub fn remove_group(data: &mut ProjectData, name: &str) -> Result<String, String> {
+    ops::remove_group(data, name, false).map_err(|e| e.to_string())?;
+    save_data(data)?;
+    Ok(format!("分组已删除: {name}（已移入回收站）"))
+}
+
+pub fn add_project_win(
+    data: &mut ProjectData,
+    group: &str,
+    name: &str,
+    path: &str,
+) -> Result<String, String> {
+    let path = path.trim().to_string();
+    if path.is_empty() {
+        return Err("项目路径不能为空".into());
+    }
+    let wsl = win_path_to_linux(&path);
+    ops::add_project(data, group, Project::new(name, path, wsl)).map_err(|e| e.to_string())?;
+    save_data(data)?;
+    Ok(format!("项目已添加: {}", name.trim()))
+}
+
+pub fn add_project_wsl(
+    data: &mut ProjectData,
+    group: &str,
+    name: &str,
+    wsl_path: &str,
+) -> Result<String, String> {
+    let wsl_path = normalize(wsl_path.trim());
+    if !is_wsl_path(&wsl_path) {
+        return Err("WSL 路径必须以 / 或 ~ 开头".into());
+    }
+    ops::add_project(data, group, Project::new(name, String::new(), wsl_path))
+        .map_err(|e| e.to_string())?;
+    save_data(data)?;
+    Ok(format!("项目已添加: {}", name.trim()))
+}
+
+pub fn edit_project(
+    data: &mut ProjectData,
+    group: &str,
+    old_name: &str,
+    new_name: &str,
+    path: &str,
+    wsl_path: &str,
+) -> Result<String, String> {
+    let new_name = new_name.trim();
+    let path = path.trim();
+    let wsl_path = wsl_path.trim();
+    ops::edit_project(
+        data,
+        old_name,
+        Some(group),
+        Some(new_name),
+        Some(path),
+        Some(wsl_path),
+    )
+    .map_err(|e| e.to_string())?;
+    save_data(data)?;
+    Ok(format!("项目已更新: {new_name}"))
+}
+
+pub fn remove_project(
+    data: &mut ProjectData,
+    project_id: &str,
+    group: &str,
+) -> Result<String, String> {
+    let removed = ops::remove_project_by_id(data, project_id, Some(group), false)
+        .map_err(|e| e.to_string())?;
+    save_data(data)?;
+    Ok(format!("已删除项目: {}（已移入回收站）", removed.name))
+}
+
+pub fn move_project(
+    data: &mut ProjectData,
+    project_id: &str,
+    source_group: &str,
+    dest: &str,
+) -> Result<String, String> {
+    ops::move_project_by_id(data, project_id, Some(source_group), dest)
+        .map_err(|e| e.to_string())?;
+    save_data(data)?;
+    Ok(format!("项目已移动到: {dest}"))
+}
+
+pub fn set_default_tool(
+    data: &mut ProjectData,
+    project_id: &str,
+    group: &str,
+    tool: Option<&str>,
+) -> Result<String, String> {
+    ops::set_default_tool(data, project_id, Some(group), tool).map_err(|e| e.to_string())?;
+    save_data(data)?;
+    Ok("默认启动方式已更新。".into())
+}
+
+pub fn add_command(
+    data: &mut ProjectData,
+    project_id: &str,
+    group: &str,
+    name: &str,
+    env: &str,
+    command: &str,
+) -> Result<String, String> {
+    ops::add_project_command(data, project_id, Some(group), name, env, command)
+        .map_err(|e| e.to_string())?;
+    save_data(data)?;
+    Ok(format!("命令已添加: {}", name.trim()))
+}
+
+pub fn edit_command(
+    data: &mut ProjectData,
+    project_id: &str,
+    group: &str,
+    index: usize,
+    name: &str,
+    env: &str,
+    command: &str,
+) -> Result<String, String> {
+    ops::edit_project_command(data, project_id, Some(group), index, name, env, command)
+        .map_err(|e| e.to_string())?;
+    save_data(data)?;
+    Ok(format!("命令已更新: {}", name.trim()))
+}
+
+pub fn remove_command(
+    data: &mut ProjectData,
+    project_id: &str,
+    group: &str,
+    index: usize,
+) -> Result<String, String> {
+    let removed = ops::remove_project_command(data, project_id, Some(group), index)
+        .map_err(|e| e.to_string())?;
+    save_data(data)?;
+    Ok(format!("命令已删除: {}", removed.name))
+}
+
+pub fn restore_trash(data: &mut ProjectData, id: &str) -> Result<String, String> {
+    let msg = ops::restore_item(data, id).map_err(|e| e.to_string())?;
+    save_data(data)?;
+    Ok(msg)
+}
+
+pub fn purge_trash_item(data: &mut ProjectData, id: &str) -> Result<String, String> {
+    let item = ops::delete_trash_item(data, id).map_err(|e| e.to_string())?;
+    save_data(data)?;
+    Ok(format!("已彻底删除: {}", item.name))
+}
+
+pub fn empty_trash(data: &mut ProjectData) -> Result<String, String> {
+    ops::empty_trash(data);
+    save_data(data)?;
+    Ok("回收站已清空。".into())
+}
+
+pub fn add_config_tool(
+    config: &mut AppConfig,
+    env: ConfigEnv,
+    name: &str,
+    command: &str,
+) -> Result<String, String> {
+    add_tool(config, env, name, command)?;
+    save_config(config)?;
+    Ok(format!("工具已添加: {}", name.trim()))
+}
+
+pub fn edit_config_tool(
+    config: &mut AppConfig,
+    env: ConfigEnv,
+    index: usize,
+    name: &str,
+    command: &str,
+) -> Result<String, String> {
+    edit_tool(config, env, index, name, command)?;
+    save_config(config)?;
+    Ok(format!("工具已更新: {}", name.trim()))
+}
+
+pub fn remove_config_tool(
+    config: &mut AppConfig,
+    env: ConfigEnv,
+    index: usize,
+) -> Result<String, String> {
+    let name = env
+        .tools(config)
+        .get(index)
+        .map(|t| t.name.clone())
+        .unwrap_or_default();
+    remove_tool(config, env, index)?;
+    save_config(config)?;
+    Ok(format!("工具已删除: {name}"))
+}
+
+pub fn reset_app_config(config: &mut AppConfig) -> Result<String, String> {
+    reset_config(config);
+    save_config(config)?;
+    Ok("配置已恢复默认。".into())
+}
+
+pub fn find_project_ref<'a>(
+    data: &'a ProjectData,
+    group: &str,
+    project_id: &str,
+) -> Option<&'a Project> {
+    let (gi, pi) = ops::find_project_by_id(data, project_id, Some(group)).ok()?;
+    Some(&data.groups[gi].projects[pi])
+}
