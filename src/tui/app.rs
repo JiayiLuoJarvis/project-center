@@ -1910,7 +1910,12 @@ impl App {
         Outcome::Continue
     }
 
-    fn handle_filter(&mut self, key: KeyEvent, data: &ProjectData, config: &AppConfig) -> Outcome {
+    fn handle_filter(
+        &mut self,
+        key: KeyEvent,
+        data: &mut ProjectData,
+        config: &mut AppConfig,
+    ) -> Outcome {
         match key.code {
             KeyCode::Esc => {
                 self.filter.clear();
@@ -1919,28 +1924,90 @@ impl App {
             }
             KeyCode::Enter => {
                 self.mode = Mode::Browse;
+                // 清空过滤串前，把过滤视图中的选中位置换算成完整列表下标，
+                // 避免清空后高亮错位。
+                match self.focus {
+                    Focus::Groups => {
+                        let pos = self.map_left_selection(data);
+                        self.filter.clear();
+                        self.left_sel = pos;
+                    }
+                    Focus::Projects => {
+                        let pi = self.map_right_selection(data, config);
+                        self.filter.clear();
+                        self.right_sel = pi.unwrap_or(0);
+                    }
+                }
+                self.clamp_selection(data, config);
+                return self.on_enter(data, config);
             }
             KeyCode::Backspace => {
                 self.filter.pop();
-                self.clamp_selection(data, config);
+                self.reselect_after_filter(data, config);
             }
             KeyCode::Char('j') | KeyCode::Down => {
-                self.mode = Mode::Browse;
                 self.move_sel(1, data, config);
-                self.mode = Mode::Filter;
             }
             KeyCode::Char('k') | KeyCode::Up => {
-                self.mode = Mode::Browse;
                 self.move_sel(-1, data, config);
-                self.mode = Mode::Filter;
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.filter.push(c);
-                self.clamp_selection(data, config);
+                self.reselect_after_filter(data, config);
             }
             _ => {}
         }
         Outcome::Continue
+    }
+
+    /// 过滤视图中左栏选中项在完整列表中的下标；
+    /// 回收站与配置固定在末尾，无匹配时回退到回收站。
+    fn map_left_selection(&self, data: &ProjectData) -> usize {
+        match self.left_items(data).get(self.left_sel) {
+            Some(LeftItem::Group(gi)) => *gi,
+            Some(LeftItem::Config) => data.groups.len() + 1,
+            _ => data.groups.len(),
+        }
+    }
+
+    /// 过滤视图中右栏选中项在完整列表中的下标；
+    /// 环境列表不参与过滤，保持原选中。
+    fn map_right_selection(&self, data: &ProjectData, config: &AppConfig) -> Option<usize> {
+        match self.right_pane.clone() {
+            RightPane::Projects => self.left_is_group(data, self.left_sel).and_then(|gi| {
+                self.filtered_project_indices(data, gi)
+                    .get(self.right_sel)
+                    .copied()
+            }),
+            RightPane::Trash => self
+                .filtered_trash_indices(data)
+                .get(self.right_sel)
+                .copied(),
+            RightPane::ConfigTools { env } => self
+                .filtered_tool_indices(config, env)
+                .get(self.right_sel)
+                .copied(),
+            RightPane::Commands { group, project_id } => {
+                actions::find_project_ref(data, &group, &project_id).and_then(|p| {
+                    self.filtered_command_indices(p)
+                        .get(self.right_sel)
+                        .copied()
+                })
+            }
+            RightPane::ConfigEnvs => Some(self.right_sel),
+        }
+    }
+
+    /// 过滤串变化后，把选中项重定位到首个匹配结果。
+    fn reselect_after_filter(&mut self, data: &ProjectData, config: &AppConfig) {
+        if self.focus == Focus::Groups {
+            self.left_sel = 0;
+            self.right_sel = 0;
+            self.sync_right_pane(data);
+        } else {
+            self.right_sel = 0;
+        }
+        self.clamp_selection(data, config);
     }
 
     pub fn resume_after_folder_pick(&mut self, path: Option<String>) {
@@ -1994,7 +2061,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Group, Project};
+    use crate::models::{DeletedItem, Group, Project, ProjectCommand};
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
@@ -2133,6 +2200,189 @@ mod tests {
         app.handle(key(KeyCode::Esc), &mut data, &mut config);
         assert!(app.filter.is_empty());
         assert!(matches!(app.mode, Mode::Browse));
+    }
+
+    #[test]
+    fn filter_reselects_first_match() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Groups;
+        app.left_sel = 2; // 配置项
+        app.handle(key(KeyCode::Char('/')), &mut data, &mut config);
+        app.handle(key(KeyCode::Char('t')), &mut data, &mut config);
+        assert_eq!(app.left_sel, 0);
+        assert_eq!(app.left_is_group(&data, 0), Some(1)); // tools
+        app.handle(key(KeyCode::Backspace), &mut data, &mut config);
+        assert_eq!(app.left_is_group(&data, 0), Some(0)); // dev
+    }
+
+    #[test]
+    fn filter_enter_opens_group() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Groups;
+        app.left_sel = 2;
+        app.handle(key(KeyCode::Char('/')), &mut data, &mut config);
+        app.handle(key(KeyCode::Char('t')), &mut data, &mut config);
+        app.handle(key(KeyCode::Enter), &mut data, &mut config);
+        assert!(app.filter.is_empty());
+        assert!(matches!(app.mode, Mode::Browse));
+        assert_eq!(app.focus, Focus::Projects);
+        assert_eq!(app.left_is_group(&data, app.left_sel), Some(1));
+        assert!(matches!(app.right_pane, RightPane::Projects));
+    }
+
+    #[test]
+    fn filter_resets_project_selection() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.right_sel = 5;
+        app.mode = Mode::Filter;
+        app.handle(key(KeyCode::Char('p')), &mut data, &mut config);
+        assert_eq!(app.right_sel, 0);
+        assert!(matches!(app.mode, Mode::Filter));
+    }
+
+    #[test]
+    fn filter_enter_trash_maps_selection() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        data.trash = vec![
+            DeletedItem {
+                id: "id-alpha".into(),
+                kind: "project".into(),
+                group: "dev".into(),
+                name: "alpha".into(),
+                ..Default::default()
+            },
+            DeletedItem {
+                id: "id-beta".into(),
+                kind: "project".into(),
+                group: "dev".into(),
+                name: "beta".into(),
+                ..Default::default()
+            },
+        ];
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.left_sel = 0;
+        app.right_pane = RightPane::Trash;
+        app.mode = Mode::Filter;
+        app.handle(key(KeyCode::Char('b')), &mut data, &mut config);
+        app.handle(key(KeyCode::Enter), &mut data, &mut config);
+        assert!(app.filter.is_empty());
+        assert!(matches!(app.mode, Mode::ActionMenu { .. }));
+        match &app.mode {
+            Mode::ActionMenu {
+                kind: ActionKind::TrashItem { id },
+                ..
+            } => assert_eq!(id, "id-beta"),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn filter_enter_keeps_tail_item_position() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Groups;
+        app.handle(key(KeyCode::Char('/')), &mut data, &mut config);
+        app.handle(key(KeyCode::Char('t')), &mut data, &mut config);
+        // 过滤视图 [tools, 回收站, 配置]，移动到配置
+        app.handle(key(KeyCode::Char('j')), &mut data, &mut config);
+        app.handle(key(KeyCode::Char('j')), &mut data, &mut config);
+        assert!(app.left_is_config(&data, app.left_sel));
+        app.handle(key(KeyCode::Enter), &mut data, &mut config);
+        assert!(app.filter.is_empty());
+        assert!(app.left_is_config(&data, app.left_sel));
+        assert!(matches!(app.right_pane, RightPane::ConfigEnvs));
+    }
+
+    #[test]
+    fn filter_enter_zero_match_lands_on_trash() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Groups;
+        app.handle(key(KeyCode::Char('/')), &mut data, &mut config);
+        app.handle(key(KeyCode::Char('z')), &mut data, &mut config);
+        app.handle(key(KeyCode::Enter), &mut data, &mut config);
+        assert!(app.filter.is_empty());
+        assert!(app.left_is_trash(&data, app.left_sel));
+        assert!(matches!(app.right_pane, RightPane::Trash));
+    }
+
+    #[test]
+    fn filter_enter_project_opens_launch_picker() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.left_sel = 0;
+        app.mode = Mode::Filter;
+        app.handle(key(KeyCode::Char('p')), &mut data, &mut config);
+        app.handle(key(KeyCode::Enter), &mut data, &mut config);
+        assert!(app.filter.is_empty());
+        assert!(matches!(app.mode, Mode::LaunchPicker { .. }));
+    }
+
+    #[test]
+    fn filter_enter_tool_maps_selection() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.left_sel = 0;
+        app.right_pane = RightPane::ConfigTools {
+            env: ConfigEnv::Wsl,
+        };
+        app.mode = Mode::Filter;
+        // 默认 WSL 工具为 [opencode, cursor-agent]，"u" 只匹配真实下标 1 的 cursor-agent
+        app.handle(key(KeyCode::Char('u')), &mut data, &mut config);
+        app.handle(key(KeyCode::Enter), &mut data, &mut config);
+        assert!(app.filter.is_empty());
+        match &app.mode {
+            Mode::ActionMenu {
+                kind: ActionKind::ConfigTool { index, .. },
+                ..
+            } => assert_eq!(*index, 1),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn filter_enter_command_maps_selection() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        data.groups[0].projects[0].commands = vec![
+            ProjectCommand::new("build", "wsl", "cargo build"),
+            ProjectCommand::new("serve", "ide", "code ."),
+        ];
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.left_sel = 0;
+        app.right_pane = RightPane::Commands {
+            group: "dev".into(),
+            project_id: data.groups[0].projects[0].id.clone(),
+        };
+        app.mode = Mode::Filter;
+        // "se" 只匹配真实下标 1 的 serve
+        app.handle(key(KeyCode::Char('s')), &mut data, &mut config);
+        app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
+        app.handle(key(KeyCode::Enter), &mut data, &mut config);
+        assert!(app.filter.is_empty());
+        match &app.mode {
+            Mode::ActionMenu {
+                kind: ActionKind::Command { index, .. },
+                ..
+            } => assert_eq!(*index, 1),
+            _ => unreachable!(),
+        }
     }
 
     #[test]
