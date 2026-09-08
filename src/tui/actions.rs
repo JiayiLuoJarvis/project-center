@@ -133,6 +133,113 @@ pub fn edit_project(
     Ok(format!("项目已更新: {new_name}"))
 }
 
+/// 新增 SSH 远程项目（path 复用为远程 Linux 路径）。
+pub fn add_project_ssh(
+    data: &mut ProjectData,
+    group: &str,
+    name: &str,
+    alias: &str,
+    ssh_target: &str,
+    ssh_path: &str,
+) -> Result<String, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("项目名不能为空".into());
+    }
+    let target = ssh_target.trim();
+    if target.is_empty() {
+        return Err("SSH 目标不能为空".into());
+    }
+    let mut project = Project::new(name, ssh_path.trim(), "");
+    project.ssh_target = target.to_string();
+    project.alias = alias.trim().to_string();
+    ops::add_project(data, group, project).map_err(|e| e.to_string())?;
+    save_data(data)?;
+    Ok(format!("项目已添加: {name}"))
+}
+
+/// 把普通项目转为 SSH 项目 / 更新 SSH 目标与远程路径。
+pub fn set_ssh_target(
+    data: &mut ProjectData,
+    group: &str,
+    project_id: &str,
+    ssh_target: &str,
+    ssh_path: &str,
+) -> Result<String, String> {
+    let target = ssh_target.trim().to_string();
+    if target.is_empty() {
+        return Err("SSH 目标不能为空".into());
+    }
+    ops::edit_ssh_fields(data, &format!("@{project_id}"), Some(group), |p| {
+        p.ssh_target = target;
+        p.path = ssh_path.trim().to_string();
+    })
+    .map_err(|e| e.to_string())?;
+    save_data(data)?;
+    Ok("项目已更新".into())
+}
+
+/// SSH 项目编辑：目标/远程路径/密钥导入/密码口令（留空不改）。
+#[allow(clippy::too_many_arguments)]
+pub fn edit_project_ssh(
+    data: &mut ProjectData,
+    group: &str,
+    project_id: &str,
+    ssh_target: &str,
+    ssh_path: &str,
+    key_source: &str,
+    password: &str,
+    key_pass: &str,
+) -> Result<String, String> {
+    let target = ssh_target.trim();
+    if target.is_empty() {
+        return Err("SSH 目标不能为空".into());
+    }
+    let (old_key_source, id) = {
+        let p = find_project_ref(data, group, project_id).ok_or("未找到项目")?;
+        (p.ssh_key_path.trim().to_string(), p.id.clone())
+    };
+    // 密钥导入：来源路径变化时读文件重新加密落盘
+    let source = key_source.trim().to_string();
+    let new_key_file = if !source.is_empty() && source != old_key_source {
+        let plain =
+            std::fs::read_to_string(&source).map_err(|e| format!("读取私钥文件失败: {e}"))?;
+        if plain.trim().is_empty() {
+            return Err("私钥文件为空".into());
+        }
+        Some(crate::secret::write_key_file(&id, &plain)?)
+    } else {
+        None
+    };
+    let password_enc = if password.is_empty() {
+        None
+    } else {
+        Some(crate::secret::protect(password)?)
+    };
+    let key_pass_enc = if key_pass.is_empty() {
+        None
+    } else {
+        Some(crate::secret::protect(key_pass)?)
+    };
+    ops::edit_ssh_fields(data, &format!("@{project_id}"), Some(group), |p| {
+        p.ssh_target = target.to_string();
+        p.path = ssh_path.trim().to_string();
+        if let Some(relative) = &new_key_file {
+            p.ssh_key_file = relative.clone();
+            p.ssh_key_path = source.clone();
+        }
+        if let Some(enc) = password_enc {
+            p.ssh_password_enc = enc;
+        }
+        if let Some(enc) = key_pass_enc {
+            p.ssh_key_pass_enc = enc;
+        }
+    })
+    .map_err(|e| e.to_string())?;
+    save_data(data)?;
+    Ok("项目已更新".into())
+}
+
 pub fn remove_project(
     data: &mut ProjectData,
     project_id: &str,

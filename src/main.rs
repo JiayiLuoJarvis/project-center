@@ -3,6 +3,7 @@ mod launcher;
 mod menu;
 mod models;
 mod ops;
+mod secret;
 mod store;
 mod tui;
 
@@ -42,6 +43,8 @@ enum Command {
     PowerShell(ProjectSelector),
     #[command(name = "code", about = "使用 VS Code 打开项目")]
     Code(ProjectSelector),
+    #[command(name = "ssh", about = "SSH 连接远程项目")]
+    Ssh(ProjectSelector),
     #[command(name = "path", about = "打印 Windows 路径")]
     Path(ProjectSelector),
     #[command(name = "wslpath", about = "打印 WSL 路径")]
@@ -62,6 +65,12 @@ enum Command {
     Config(ConfigCommand),
     #[command(subcommand, about = "管理回收站")]
     Trash(TrashCommand),
+    #[command(subcommand, about = "管理查看 PIN")]
+    Pin(PinCommand),
+    #[command(subcommand, about = "查看项目保存的 SSH 秘密")]
+    Secret(SecretCommand),
+    #[command(name = "__askpass", hide = true)]
+    Askpass { prompt: String },
 }
 
 #[derive(Args)]
@@ -75,12 +84,14 @@ struct ProjectSelector {
 struct OpenArgs {
     #[command(flatten)]
     selector: ProjectSelector,
-    #[arg(short = 'w', long, conflicts_with_all = ["powershell", "code"])]
+    #[arg(short = 'w', long, conflicts_with_all = ["powershell", "code", "ssh"])]
     wsl: bool,
-    #[arg(short = 'p', long, conflicts_with_all = ["wsl", "code"])]
+    #[arg(short = 'p', long, conflicts_with_all = ["wsl", "code", "ssh"])]
     powershell: bool,
-    #[arg(short = 'c', long, conflicts_with_all = ["wsl", "powershell"])]
+    #[arg(short = 'c', long, conflicts_with_all = ["wsl", "powershell", "ssh"])]
     code: bool,
+    #[arg(short = 's', long, conflicts_with_all = ["wsl", "powershell", "code"])]
+    ssh: bool,
 }
 
 #[derive(Args)]
@@ -94,6 +105,22 @@ struct AddArgs {
     dir: Option<PathBuf>,
     #[arg(long = "wsl-path")]
     wsl_path: Option<String>,
+    #[arg(
+        long = "ssh",
+        help = "SSH 目标（user@host 或 user@host:端口）；设置后为 SSH 远程项目"
+    )]
+    ssh: Option<String>,
+    #[arg(
+        long = "ssh-path",
+        help = "远程 Linux 路径（登录后尝试 cd，失败则留在默认 shell）"
+    )]
+    ssh_path: Option<String>,
+    #[arg(long = "ssh-key", help = "导入私钥文件（DPAPI 加密存入数据目录）")]
+    ssh_key: Option<PathBuf>,
+    #[arg(long = "password-stdin", help = "从 stdin 读入登录密码并加密保存")]
+    password_stdin: bool,
+    #[arg(long = "key-pass-stdin", help = "从 stdin 读入私钥口令并加密保存")]
+    key_pass_stdin: bool,
 }
 
 #[derive(Args)]
@@ -109,6 +136,21 @@ struct EditArgs {
     dir: Option<PathBuf>,
     #[arg(long = "wsl-path")]
     wsl_path: Option<String>,
+    #[arg(long = "ssh", help = "更新 SSH 目标（user@host 或 user@host:端口）")]
+    ssh: Option<String>,
+    #[arg(long = "ssh-path", help = "更新远程 Linux 路径；空串清除")]
+    ssh_path: Option<String>,
+    #[arg(long = "ssh-key", help = "导入私钥文件（覆盖已存密钥）")]
+    ssh_key: Option<PathBuf>,
+    #[arg(long = "password-stdin", help = "从 stdin 读入登录密码并加密保存")]
+    password_stdin: bool,
+    #[arg(long = "key-pass-stdin", help = "从 stdin 读入私钥口令并加密保存")]
+    key_pass_stdin: bool,
+    #[arg(
+        long = "clear-ssh",
+        help = "清除 SSH 配置（目标、远程路径、密钥与全部秘密）"
+    )]
+    clear_ssh: bool,
 }
 
 #[derive(Args)]
@@ -149,6 +191,25 @@ enum TrashCommand {
         #[arg(long, help = "跳过确认")]
         force: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum PinCommand {
+    #[command(about = "设置查看 PIN（查看保存的密码/口令时必须）")]
+    Set,
+    #[command(about = "修改 PIN（需验证旧 PIN）")]
+    Change,
+    #[command(about = "重置 PIN：清除 PIN 并清空所有已存密码、口令与密钥文件")]
+    Reset {
+        #[arg(long, help = "跳过确认")]
+        force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SecretCommand {
+    #[command(about = "查看项目的保存密码与私钥口令（需 PIN）")]
+    Show(ProjectSelector),
 }
 
 #[derive(Subcommand)]
@@ -224,6 +285,7 @@ fn main() -> Result<()> {
         Some(Command::Open(args)) => cmd_open(args),
         Some(Command::Wsl(selector)) => cmd_direct(&selector, LaunchEnv::Wsl),
         Some(Command::PowerShell(selector)) => cmd_direct(&selector, LaunchEnv::PowerShell),
+        Some(Command::Ssh(selector)) => cmd_direct(&selector, LaunchEnv::Ssh),
         Some(Command::Code(selector)) => cmd_code(&selector, &config),
         Some(Command::Path(selector)) => cmd_path(&selector, false),
         Some(Command::WslPath(selector)) => cmd_path(&selector, true),
@@ -235,6 +297,9 @@ fn main() -> Result<()> {
         Some(Command::Group(command)) => cmd_group(command),
         Some(Command::Config(command)) => cmd_config(command),
         Some(Command::Trash(command)) => cmd_trash(command),
+        Some(Command::Pin(command)) => cmd_pin(command),
+        Some(Command::Secret(command)) => cmd_secret(command),
+        Some(Command::Askpass { prompt }) => cmd_askpass(&prompt),
     }
 }
 
@@ -333,15 +398,15 @@ fn cmd_open(args: OpenArgs) -> Result<()> {
         Some((LaunchEnv::PowerShell, String::new()))
     } else if args.code {
         Some((LaunchEnv::Ide, first_ide_command(&config)?))
+    } else if args.ssh {
+        Some((LaunchEnv::Ssh, String::new()))
     } else {
         None
     };
     if let Some((env, command)) = direct {
-        let child = launcher::spawn_direct(&project, &group_name, env, &command)
+        let spawned = launcher::spawn_direct(&project, &group_name, env, &command)
             .map_err(anyhow::Error::msg)?;
-        if let Some(child) = child {
-            launcher::wait_direct(child).map_err(anyhow::Error::msg)?;
-        }
+        launcher::wait_spawned(spawned).map_err(anyhow::Error::msg)?;
         return Ok(());
     }
     let mut data = Store::load();
@@ -351,11 +416,9 @@ fn cmd_open(args: OpenArgs) -> Result<()> {
 
 fn cmd_direct(selector: &ProjectSelector, env: LaunchEnv) -> Result<()> {
     let (project, group_name) = find_selected(selector)?;
-    let child =
+    let spawned =
         launcher::spawn_direct(&project, &group_name, env, "").map_err(anyhow::Error::msg)?;
-    if let Some(child) = child {
-        launcher::wait_direct(child).map_err(anyhow::Error::msg)?;
-    }
+    launcher::wait_spawned(spawned).map_err(anyhow::Error::msg)?;
     Ok(())
 }
 
@@ -363,11 +426,9 @@ fn cmd_direct(selector: &ProjectSelector, env: LaunchEnv) -> Result<()> {
 fn cmd_code(selector: &ProjectSelector, config: &AppConfig) -> Result<()> {
     let command = first_ide_command(config)?;
     let (project, group_name) = find_selected(selector)?;
-    let child = launcher::spawn_direct(&project, &group_name, LaunchEnv::Ide, &command)
+    let spawned = launcher::spawn_direct(&project, &group_name, LaunchEnv::Ide, &command)
         .map_err(anyhow::Error::msg)?;
-    if let Some(child) = child {
-        launcher::wait_direct(child).map_err(anyhow::Error::msg)?;
-    }
+    launcher::wait_spawned(spawned).map_err(anyhow::Error::msg)?;
     Ok(())
 }
 
@@ -468,32 +529,50 @@ fn cmd_path(selector: &ProjectSelector, wsl: bool) -> Result<()> {
 }
 
 fn cmd_add(args: AddArgs) -> Result<()> {
-    let path = match args.dir {
-        Some(path) => path.to_string_lossy().trim().to_string(),
-        None if args.wsl_path.is_some() => String::new(),
-        None => rfd::FileDialog::new()
-            .pick_folder()
-            .ok_or_else(|| anyhow::anyhow!("未选择项目目录"))?
-            .to_string_lossy()
-            .trim()
-            .to_string(),
-    };
-    if path.is_empty() && args.wsl_path.is_none() {
-        bail!("项目路径不能为空");
-    }
-    let wsl_path = args
-        .wsl_path
-        .map(|path| path.trim().to_string())
-        .unwrap_or_else(|| models::win_path_to_linux(&path));
-    if path.is_empty() && wsl_path.is_empty() {
-        bail!("WSL 路径不能为空");
-    }
     let mut data = Store::load();
-    let mut project = Project::new(args.name, path, wsl_path);
+    let mut project = if let Some(ssh_target) = args.ssh.as_deref() {
+        // SSH 远程项目：不弹目录选择器，path 复用为远程 Linux 路径。
+        let ssh_target = ssh_target.trim().to_string();
+        if ssh_target.is_empty() {
+            bail!("SSH 目标不能为空");
+        }
+        let ssh_path = args.ssh_path.as_deref().unwrap_or("").trim().to_string();
+        Project::new(&args.name, ssh_path, "").with_ssh_target(ssh_target)
+    } else {
+        let path = match args.dir {
+            Some(path) => path.to_string_lossy().trim().to_string(),
+            None if args.wsl_path.is_some() => String::new(),
+            None => rfd::FileDialog::new()
+                .pick_folder()
+                .ok_or_else(|| anyhow::anyhow!("未选择项目目录"))?
+                .to_string_lossy()
+                .trim()
+                .to_string(),
+        };
+        if path.is_empty() && args.wsl_path.is_none() {
+            bail!("项目路径不能为空");
+        }
+        let wsl_path = args
+            .wsl_path
+            .map(|path| path.trim().to_string())
+            .unwrap_or_else(|| models::win_path_to_linux(&path));
+        if path.is_empty() && wsl_path.is_empty() {
+            bail!("WSL 路径不能为空");
+        }
+        Project::new(&args.name, path, wsl_path)
+    };
     if let Some(alias) = args.alias {
         project.alias = alias.trim().to_string();
     }
     ops::add_project(&mut data, &args.group, project)?;
+    apply_ssh_secrets(
+        &mut data,
+        &args.name,
+        Some(&args.group),
+        args.ssh_key.as_deref(),
+        args.password_stdin,
+        args.key_pass_stdin,
+    )?;
     save(&data)?;
     println!("项目已添加。");
     Ok(())
@@ -515,9 +594,116 @@ fn cmd_edit(args: EditArgs) -> Result<()> {
         path.as_deref(),
         args.wsl_path.as_deref(),
     )?;
+    if args.clear_ssh {
+        clear_project_ssh(&mut data, &name, group);
+    }
+    if let Some(ssh_target) = args.ssh.as_deref() {
+        let ssh_target = ssh_target.trim().to_string();
+        if ssh_target.is_empty() {
+            bail!("SSH 目标不能为空（清除 SSH 配置请用 --clear-ssh）");
+        }
+        ops::edit_ssh_fields(&mut data, &name, group, |p| {
+            p.ssh_target = ssh_target;
+        })?;
+    }
+    if let Some(ssh_path) = args.ssh_path.as_deref() {
+        let ssh_path = ssh_path.trim().to_string();
+        ops::edit_ssh_fields(&mut data, &name, group, |p| {
+            p.path = ssh_path;
+        })?;
+    }
+    apply_ssh_secrets(
+        &mut data,
+        &name,
+        group,
+        args.ssh_key.as_deref(),
+        args.password_stdin,
+        args.key_pass_stdin,
+    )?;
     save(&data)?;
     println!("项目已更新。");
     Ok(())
+}
+
+/// 把项目切换为 SSH 项目（仅 add/edit 入口使用）。
+impl Project {
+    fn with_ssh_target(mut self, target: String) -> Self {
+        self.ssh_target = target;
+        self
+    }
+}
+
+/// 导入私钥与读入密码/口令（stdin），DPAPI 加密后写入项目。
+fn apply_ssh_secrets(
+    data: &mut ProjectData,
+    name: &str,
+    group: Option<&str>,
+    ssh_key: Option<&std::path::Path>,
+    password_stdin: bool,
+    key_pass_stdin: bool,
+) -> Result<()> {
+    if let Some(key_path) = ssh_key {
+        let plain = std::fs::read_to_string(key_path)
+            .map_err(|e| anyhow::anyhow!("读取私钥文件失败: {e}"))?;
+        if plain.trim().is_empty() {
+            bail!("私钥文件为空");
+        }
+        let relative = {
+            let (group_index, project_index) = select_project(data, name, group)?;
+            let id = data.groups[group_index].projects[project_index].id.clone();
+            secret::write_key_file(&id, &plain).map_err(anyhow::Error::msg)?
+        };
+        let source = key_path.to_string_lossy().into_owned();
+        ops::edit_ssh_fields(data, name, group, |p| {
+            p.ssh_key_file = relative;
+            p.ssh_key_path = source;
+        })?;
+    }
+    if password_stdin {
+        let plain = read_stdin_line("登录密码")?;
+        if !plain.is_empty() {
+            let enc = secret::protect(&plain).map_err(anyhow::Error::msg)?;
+            ops::edit_ssh_fields(data, name, group, |p| {
+                p.ssh_password_enc = enc;
+            })?;
+        }
+    }
+    if key_pass_stdin {
+        let plain = read_stdin_line("私钥口令")?;
+        if !plain.is_empty() {
+            let enc = secret::protect(&plain).map_err(anyhow::Error::msg)?;
+            ops::edit_ssh_fields(data, name, group, |p| {
+                p.ssh_key_pass_enc = enc;
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// 清除项目的 SSH 配置（目标、远程路径、密钥引用与全部秘密）。
+fn clear_project_ssh(data: &mut ProjectData, name: &str, group: Option<&str>) {
+    let (group_index, project_index) = match select_project(data, name, group) {
+        Ok(indexes) => indexes,
+        Err(_) => return,
+    };
+    let old_key = data.groups[group_index].projects[project_index]
+        .ssh_key_file
+        .clone();
+    if !old_key.trim().is_empty()
+        && secret::delete_key_file(&old_key).is_err()
+        && !data.pending_key_deletes.iter().any(|r| r == &old_key)
+    {
+        data.pending_key_deletes.push(old_key);
+    }
+    if let Ok(project) = ops::edit_ssh_fields(data, name, group, |p| {
+        p.ssh_target.clear();
+        p.ssh_key_file.clear();
+        p.ssh_key_path.clear();
+        p.ssh_password_enc.clear();
+        p.ssh_key_pass_enc.clear();
+    }) {
+        let _ = project;
+    }
 }
 
 fn cmd_rm(args: RmArgs) -> Result<()> {
@@ -661,10 +847,272 @@ fn cmd_run(args: RunArgs) -> Result<()> {
         bail!("缺少命令名，或使用 --list 列出项目自定义命令");
     };
     let (env, command) = resolve_run_command(project, name)?;
-    let child =
+    let spawned =
         launcher::spawn_direct(project, &group_name, env, &command).map_err(anyhow::Error::msg)?;
-    if let Some(child) = child {
-        launcher::wait_direct(child).map_err(anyhow::Error::msg)?;
+    launcher::wait_spawned(spawned).map_err(anyhow::Error::msg)?;
+    Ok(())
+}
+
+/// 从 stdin 读取一行（`--password-stdin` / `--key-pass-stdin`）。
+fn read_stdin_line(label: &str) -> Result<String> {
+    use std::io::BufRead;
+    eprintln!("请输入{label}（stdin，行尾换行结束）:");
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line)?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+/// 不回显读入一行：控制台走 Win32 逐字符读；重定向/管道回退普通 stdin。
+#[cfg(windows)]
+fn read_hidden_line(prompt: &str) -> Result<String> {
+    use windows_sys::Win32::System::Console::{
+        ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, GetConsoleMode, GetStdHandle,
+        ReadConsoleW, STD_INPUT_HANDLE, SetConsoleMode,
+    };
+    print!("{prompt}");
+    use std::io::Write as _;
+    std::io::stdout().flush()?;
+
+    unsafe {
+        let handle = GetStdHandle(STD_INPUT_HANDLE);
+        let mut original = 0;
+        if GetConsoleMode(handle, &mut original) != 0 {
+            let raw = original & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT) | ENABLE_PROCESSED_INPUT;
+            if SetConsoleMode(handle, raw) != 0 {
+                let mut chars: Vec<u16> = Vec::new();
+                let mut buf = [0u16; 1];
+                let mut read;
+                loop {
+                    read = 0;
+                    if ReadConsoleW(
+                        handle,
+                        buf.as_mut_ptr().cast(),
+                        1,
+                        &mut read,
+                        std::ptr::null_mut(),
+                    ) == 0
+                        || read == 0
+                    {
+                        break;
+                    }
+                    let c = buf[0];
+                    match c {
+                        0x0D => break,                        // Enter
+                        0x0A if chars.is_empty() => continue, // 吞掉上一次读取残留的换行
+                        0x08 => {
+                            chars.pop(); // Backspace
+                        }
+                        0x20..=0xFFFE => chars.push(c),
+                        _ => {}
+                    }
+                }
+                SetConsoleMode(handle, original);
+                println!();
+                return Ok(String::from_utf16_lossy(&chars));
+            }
+        }
+    }
+    // 非 console stdin（重定向）：退化为普通读行。
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+#[cfg(not(windows))]
+fn read_hidden_line(prompt: &str) -> Result<String> {
+    print!("{prompt}");
+    use std::io::Write as _;
+    std::io::stdout().flush()?;
+    let mut line = String::new();
+    std::io::stdin().read_line(&mut line)?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+/// 保存 PIN 记录；失败仅警告。
+fn save_pin(config: &mut AppConfig, record: Option<secret::PinRecord>) {
+    config.pin = record;
+    if !Config::save(config) {
+        eprintln!("警告：无法保存 config.json，PIN 状态可能未持久化。");
+    }
+}
+
+fn cmd_pin(command: PinCommand) -> Result<()> {
+    let mut config = Config::load();
+    match command {
+        PinCommand::Set => {
+            if config.pin.is_some() {
+                bail!("PIN 已设置，使用 `pcs pin change` 修改或 `pcs pin reset --force` 重置");
+            }
+            let pin = read_hidden_line("设置 PIN (4-12 位数字): ")?;
+            let confirm = read_hidden_line("确认 PIN: ")?;
+            if pin != confirm {
+                bail!("两次输入不一致");
+            }
+            let record = secret::pin_record_from(&pin).map_err(anyhow::Error::msg)?;
+            save_pin(&mut config, Some(record));
+            println!("PIN 已设置。查看密码请用 `pcs secret show <项目>`。");
+        }
+        PinCommand::Change => {
+            let Some(record) = config.pin.clone() else {
+                bail!("尚未设置 PIN，先 `pcs pin set`");
+            };
+            let old = read_hidden_line("当前 PIN: ")?;
+            if !secret::verify_pin(&old, &record).map_err(anyhow::Error::msg)? {
+                bail!("PIN 不正确");
+            }
+            let new_pin = read_hidden_line("新 PIN (4-12 位数字): ")?;
+            let confirm = read_hidden_line("确认新 PIN: ")?;
+            if new_pin != confirm {
+                bail!("两次输入不一致");
+            }
+            let record = secret::pin_record_from(&new_pin).map_err(anyhow::Error::msg)?;
+            save_pin(&mut config, Some(record));
+            println!("PIN 已修改。");
+        }
+        PinCommand::Reset { force } => {
+            if config.pin.is_none() {
+                bail!("尚未设置 PIN");
+            }
+            if !force {
+                println!("这将清除 PIN 并清空所有已存密码、口令与密钥文件，且不可恢复！");
+                let confirm = read_hidden_line("确认请输入 yes: ")?;
+                if !confirm.eq_ignore_ascii_case("yes") {
+                    bail!("已取消");
+                }
+            }
+            let mut data = Store::load();
+            clear_all_saved_secrets(&mut data);
+            save(&data)?;
+            save_pin(&mut config, None);
+            println!("PIN 与全部已存秘密已清除。SSH 项目仍可手动输密码/口令登录。");
+        }
+    }
+    Ok(())
+}
+
+/// 清空 groups 与 trash 快照中的全部秘密字段，并删除整个密钥目录。
+/// 目录删除失败仅警告：字段已清，残留文件由下次启动的孤儿清理兜底。
+fn clear_all_saved_secrets(data: &mut ProjectData) {
+    let clear = |p: &mut Project| {
+        p.ssh_key_file.clear();
+        p.ssh_key_path.clear();
+        p.ssh_password_enc.clear();
+        p.ssh_key_pass_enc.clear();
+    };
+    for project in data.groups.iter_mut().flat_map(|g| g.projects.iter_mut()) {
+        clear(project);
+    }
+    for item in &mut data.trash {
+        item.ssh_key_file.clear();
+        item.ssh_key_path.clear();
+        item.ssh_password_enc.clear();
+        item.ssh_key_pass_enc.clear();
+        for project in &mut item.projects {
+            clear(project);
+        }
+    }
+    data.pending_key_deletes.clear();
+    if let Err(e) = std::fs::remove_dir_all(secret::data_root().join("keys"))
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("警告：密钥目录删除失败（{e}），残留文件将在下次启动时清理。");
+    }
+}
+
+fn cmd_secret(command: SecretCommand) -> Result<()> {
+    let SecretCommand::Show(selector) = command;
+    let data = Store::load();
+    let (group_index, project_index) =
+        select_project(&data, &selector.name, selector.group.as_deref())?;
+    let project = &data.groups[group_index].projects[project_index];
+    if !project.is_ssh_project() {
+        bail!("项目 `{}` 不是 SSH 项目", project.name);
+    }
+    if project.ssh_password_enc.is_empty() && project.ssh_key_pass_enc.is_empty() {
+        bail!("项目 `{}` 未保存密码或私钥口令", project.name);
+    }
+    let config = Config::load();
+    let Some(record) = &config.pin else {
+        bail!("尚未设置 PIN，先 `pcs pin set`");
+    };
+    let mut verified = false;
+    for attempt in 1..=3 {
+        let pin = read_hidden_line("PIN: ")?;
+        if secret::verify_pin(&pin, record).map_err(anyhow::Error::msg)? {
+            verified = true;
+            break;
+        }
+        if attempt < 3 {
+            eprintln!("PIN 不正确，还剩 {} 次机会。", 3 - attempt);
+        }
+    }
+    if !verified {
+        bail!("PIN 验证失败");
+    }
+    println!("项目: {}", project.name);
+    if !project.ssh_password_enc.is_empty() {
+        match secret::unprotect(&project.ssh_password_enc) {
+            Ok(pw) => println!("登录密码: {pw}"),
+            Err(e) => println!("登录密码: <解密失败: {e}>"),
+        }
+    }
+    if !project.ssh_key_pass_enc.is_empty() {
+        match secret::unprotect(&project.ssh_key_pass_enc) {
+            Ok(kp) => println!("私钥口令: {kp}"),
+            Err(e) => println!("私钥口令: <解密失败: {e}>"),
+        }
+    }
+    Ok(())
+}
+
+/// askpass prompt 分派：只回答密码与私钥口令，其余（host key yes/no 等）忽略。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AskpassKind {
+    Password,
+    KeyPass,
+    Ignore,
+}
+
+fn askpass_kind(prompt: &str) -> AskpassKind {
+    let lower = prompt.to_lowercase();
+    if lower.contains("password") || prompt.contains("密码") {
+        AskpassKind::Password
+    } else if lower.contains("passphrase") {
+        AskpassKind::KeyPass
+    } else {
+        AskpassKind::Ignore
+    }
+}
+
+/// SSH_ASKPASS 回调：校验 token -> 按 prompt 分派 -> 解密 -> stdout。
+/// 只读加载（不写回、不维护），避免与父进程的 projects.json 写竞态。
+/// 非密码/口令类 prompt（host key 的 yes/no 等）一律输出空，绝不代答。
+fn cmd_askpass(prompt: &str) -> Result<()> {
+    let token = std::env::var("PCS_ASKPASS_TOKEN").unwrap_or_default();
+    if token.trim().is_empty() {
+        // 未经历 pcs 注入：拒绝输出。
+        return Ok(());
+    }
+    let id = std::env::var("PCS_ASKPASS_ID").unwrap_or_default();
+    let data = Store::load_readonly();
+    let Some(project) = data
+        .groups
+        .iter()
+        .flat_map(|g| g.projects.iter())
+        .find(|p| p.id.eq_ignore_ascii_case(&id))
+    else {
+        return Ok(());
+    };
+    let enc = match askpass_kind(prompt) {
+        AskpassKind::Password => &project.ssh_password_enc,
+        AskpassKind::KeyPass => &project.ssh_key_pass_enc,
+        AskpassKind::Ignore => return Ok(()),
+    };
+    if enc.trim().is_empty() {
+        return Ok(());
+    }
+    if let Ok(plain) = secret::unprotect(enc) {
+        println!("{plain}");
     }
     Ok(())
 }
@@ -703,6 +1151,25 @@ fn save(data: &ProjectData) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn askpass_kind_dispatch() {
+        assert_eq!(
+            askpass_kind("abc@172.16.14.10's password: "),
+            AskpassKind::Password
+        );
+        assert_eq!(askpass_kind("请输入密码："), AskpassKind::Password);
+        assert_eq!(
+            askpass_kind("Enter passphrase for key 'C:\\keys\\id_ed25519': "),
+            AskpassKind::KeyPass
+        );
+        // host key 的 yes/no 等绝不代答
+        assert_eq!(
+            askpass_kind("Are you sure you want to continue connecting (yes/no/[fingerprint])? "),
+            AskpassKind::Ignore
+        );
+        assert_eq!(askpass_kind("Verification code: "), AskpassKind::Ignore);
+    }
     use crate::models::Group;
 
     fn dup_data() -> ProjectData {
@@ -792,6 +1259,11 @@ mod tests {
                     wsl_path: "/mnt/e/old".into(),
                     default_tool: String::new(),
                     commands: Vec::new(),
+                    ssh_target: String::new(),
+                    ssh_key_file: String::new(),
+                    ssh_key_path: String::new(),
+                    ssh_password_enc: String::new(),
+                    ssh_key_pass_enc: String::new(),
                     projects: Vec::new(),
                     deleted_at: 1700000000,
                 },
@@ -805,10 +1277,16 @@ mod tests {
                     wsl_path: String::new(),
                     default_tool: String::new(),
                     commands: Vec::new(),
+                    ssh_target: String::new(),
+                    ssh_key_file: String::new(),
+                    ssh_key_path: String::new(),
+                    ssh_password_enc: String::new(),
+                    ssh_key_pass_enc: String::new(),
                     projects: vec![Project::new("inner", r"E:\inner", "")],
                     deleted_at: 1700000000,
                 },
             ],
+            pending_key_deletes: Vec::new(),
         }
     }
 

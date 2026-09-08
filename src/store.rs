@@ -54,11 +54,19 @@ impl Store {
         let (mut data, backfilled, recovered) = Self::load_from_inner(&path);
         // 超过保留期的回收站项自动清理。
         let purged = crate::ops::purge_expired_trash(&mut data);
+        // 秘密维护：pendingKeyDeletes 重试、孤儿 key 清理、keys_tmp 残留清理。
+        let maintained = crate::secret::startup_maintenance(&mut data);
         // 回填 id / 损坏恢复 / 清理过期项后立即写回，避免只读命令丢恢复结果。
-        if backfilled || recovered || purged {
+        if backfilled || recovered || purged || maintained {
             let _ = Self::save_to(&data, &path);
         }
         data
+    }
+
+    /// 只读加载（`__askpass` 专用）：不写回、不做维护，
+    /// 避免与正在运行的父进程产生 projects.json 写竞态。
+    pub fn load_readonly() -> ProjectData {
+        Self::load_from_inner(&Self::file_path()).0
     }
 
     pub fn save(data: &ProjectData) -> bool {

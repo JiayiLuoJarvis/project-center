@@ -264,6 +264,24 @@ pub fn remove_project_by_id(
     Ok(remove_project_at(data, group_index, project_index, force))
 }
 
+/// 定位项目并原地更新 SSH 字段；返回更新后的项目克隆。
+/// 定位支持名字 / `@<id>`（大小写不敏感、唯一前缀、分组消歧）。
+pub fn edit_ssh_fields(
+    data: &mut ProjectData,
+    name: &str,
+    group: Option<&str>,
+    update: impl FnOnce(&mut Project),
+) -> Result<Project> {
+    let (group_index, project_index) = if let Some(id) = name.strip_prefix('@') {
+        find_project_by_id(data, id, group)?
+    } else {
+        find_project(data, name, group)?
+    };
+    let project = &mut data.groups[group_index].projects[project_index];
+    update(project);
+    Ok(project.clone())
+}
+
 fn remove_project_at(
     data: &mut ProjectData,
     group_index: usize,
@@ -278,8 +296,30 @@ fn remove_project_at(
             &group_name,
             current_unix_ts(),
         ));
+    } else {
+        drop_key_file(data, &project.ssh_key_file);
     }
     project
+}
+
+/// 删除一个 key 文件；失败记入 `pendingKeyDeletes` 延迟重试（调用方负责保存）。
+fn drop_key_file(data: &mut ProjectData, relative: &str) {
+    if relative.trim().is_empty() {
+        return;
+    }
+    if crate::secret::delete_key_file(relative).is_err()
+        && !data.pending_key_deletes.iter().any(|r| r == relative)
+    {
+        data.pending_key_deletes.push(relative.to_string());
+    }
+}
+
+/// 彻底移除一个回收站项引用的全部密钥文件（项自身 + 分组快照内项目）。
+fn drop_item_key_files(data: &mut ProjectData, item: &DeletedItem) {
+    drop_key_file(data, &item.ssh_key_file);
+    for project in &item.projects {
+        drop_key_file(data, &project.ssh_key_file);
+    }
 }
 
 /// 在回收站中按 id 定位（`@` 前缀、唯一前缀、大小写不敏感）。
@@ -370,6 +410,11 @@ fn restore_project(data: &mut ProjectData, item: DeletedItem) -> Result<String> 
         wsl_path: item.wsl_path.clone(),
         default_tool: item.default_tool.clone(),
         commands: item.commands.clone(),
+        ssh_target: item.ssh_target.clone(),
+        ssh_key_file: item.ssh_key_file.clone(),
+        ssh_key_path: item.ssh_key_path.clone(),
+        ssh_password_enc: item.ssh_password_enc.clone(),
+        ssh_key_pass_enc: item.ssh_key_pass_enc.clone(),
     };
     project.ensure_id();
     // id 已被现有项目占用时重新生成
@@ -468,7 +513,9 @@ fn restore_group(data: &mut ProjectData, item: DeletedItem) -> Result<String> {
 /// 从回收站中彻底删除指定项（不可恢复）。
 pub fn delete_trash_item(data: &mut ProjectData, id: &str) -> Result<DeletedItem> {
     let index = find_deleted_by_id(data, id)?;
-    Ok(data.trash.remove(index))
+    let item = data.trash.remove(index);
+    drop_item_key_files(data, &item);
+    Ok(item)
 }
 
 /// 回收站保留期（天）：超过保留期的项在加载时自动清理。
@@ -478,15 +525,23 @@ pub const TRASH_RETENTION_DAYS: i64 = 30;
 /// 返回是否清理了任何项。
 pub fn purge_expired_trash(data: &mut ProjectData) -> bool {
     let cutoff = current_unix_ts() - TRASH_RETENTION_DAYS * 86_400;
-    let len_before = data.trash.len();
-    data.trash
-        .retain(|item| item.deleted_at <= 0 || item.deleted_at >= cutoff);
-    data.trash.len() != len_before
+    let (expired, kept): (Vec<DeletedItem>, Vec<DeletedItem>) = data
+        .trash
+        .drain(..)
+        .partition(|item| item.deleted_at > 0 && item.deleted_at < cutoff);
+    for item in &expired {
+        drop_item_key_files(data, item);
+    }
+    data.trash = kept;
+    !expired.is_empty()
 }
 
-/// 清空回收站。
+/// 清空回收站（连同各项目引用的密钥文件）。
 pub fn empty_trash(data: &mut ProjectData) {
-    data.trash.clear();
+    let items: Vec<DeletedItem> = data.trash.drain(..).collect();
+    for item in &items {
+        drop_item_key_files(data, item);
+    }
 }
 
 pub fn move_project(
@@ -1139,6 +1194,27 @@ mod tests {
         data.trash[0].deleted_at = now - retention_secs;
         assert!(!purge_expired_trash(&mut data));
         assert_eq!(data.trash.len(), 2);
+    }
+
+    #[test]
+    fn soft_delete_keeps_key_reference_and_purge_defers_failed_deletes() {
+        let mut data = trash_data();
+        // 快照带 SSH 秘密字段
+        let mut ssh = Project::new("srv", "/opt/x", "");
+        ssh.ssh_target = "abc@h".into();
+        ssh.ssh_key_file = "keys/srv.key".into();
+        ssh.ssh_password_enc = "PWENC".into();
+        data.groups[0].projects.push(ssh);
+        // 软删：key 引用随快照保留（可恢复），pending 不变
+        let removed = remove_project(&mut data, "srv", None, false).unwrap();
+        assert_eq!(data.trash.last().unwrap().ssh_key_file, "keys/srv.key");
+        assert!(data.pending_key_deletes.is_empty());
+        // drop_key_file 对不存在文件视为成功；对删除失败路径去重
+        drop_key_file(&mut data, &removed.ssh_key_file);
+        assert!(data.pending_key_deletes.is_empty(), "不存在的文件删除成功");
+        data.pending_key_deletes.push("keys/srv.key".into());
+        drop_key_file(&mut data, "keys/srv.key");
+        assert_eq!(data.pending_key_deletes.len(), 1, "pending 去重");
     }
 
     #[test]

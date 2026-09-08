@@ -18,6 +18,22 @@ pub struct Project {
     /// 项目级自定义命令。
     #[serde(rename = "commands", default)]
     pub commands: Vec<ProjectCommand>,
+    /// SSH 目标（如 `user@host` 或 `user@host:2222`）；非空即 SSH 远程项目。
+    #[serde(rename = "sshTarget", default)]
+    pub ssh_target: String,
+    /// 私钥 sidecar 文件的相对路径（相对数据根，如 `keys/<uuid>.key`）；
+    /// 非空且文件存在即有密钥。空表示未导入密钥。
+    #[serde(rename = "sshKeyFile", default)]
+    pub ssh_key_file: String,
+    /// 私钥导入来源路径，仅显示用，明文无秘密。
+    #[serde(rename = "sshKeyPath", default)]
+    pub ssh_key_path: String,
+    /// 登录密码 DPAPI 密文（base64）；空表示未保存。
+    #[serde(rename = "sshPasswordEnc", default)]
+    pub ssh_password_enc: String,
+    /// 私钥口令 DPAPI 密文（base64）；空表示未保存。
+    #[serde(rename = "sshKeyPassEnc", default)]
+    pub ssh_key_pass_enc: String,
 }
 
 impl Project {
@@ -34,7 +50,17 @@ impl Project {
             wsl_path: wsl_path.into(),
             default_tool: String::new(),
             commands: Vec::new(),
+            ssh_target: String::new(),
+            ssh_key_file: String::new(),
+            ssh_key_path: String::new(),
+            ssh_password_enc: String::new(),
+            ssh_key_pass_enc: String::new(),
         }
+    }
+
+    /// 是否 SSH 远程项目：`sshTarget` 非空即判定，与本地/WSL 路径互斥。
+    pub fn is_ssh_project(&self) -> bool {
+        !self.ssh_target.trim().is_empty()
     }
 
     pub fn with_alias(mut self, alias: impl Into<String>) -> Self {
@@ -132,6 +158,9 @@ pub struct ProjectData {
     pub groups: Vec<Group>,
     #[serde(default)]
     pub trash: Vec<DeletedItem>,
+    /// 删除失败的私钥 sidecar 相对路径，每次启动重试删除（成功即摘除）。
+    #[serde(rename = "pendingKeyDeletes", default)]
+    pub pending_key_deletes: Vec<String>,
 }
 
 /// 回收站中的一条记录：被删项目或分组在删除时刻的完整快照。
@@ -159,6 +188,21 @@ pub struct DeletedItem {
     /// 项目项的自定义命令快照。
     #[serde(rename = "commands", default)]
     pub commands: Vec<ProjectCommand>,
+    /// SSH 目标快照。
+    #[serde(rename = "sshTarget", default)]
+    pub ssh_target: String,
+    /// 私钥 sidecar 相对路径快照。
+    #[serde(rename = "sshKeyFile", default)]
+    pub ssh_key_file: String,
+    /// 私钥来源路径快照。
+    #[serde(rename = "sshKeyPath", default)]
+    pub ssh_key_path: String,
+    /// 登录密码密文快照。
+    #[serde(rename = "sshPasswordEnc", default)]
+    pub ssh_password_enc: String,
+    /// 私钥口令密文快照。
+    #[serde(rename = "sshKeyPassEnc", default)]
+    pub ssh_key_pass_enc: String,
     /// 分组项的完整项目数组。
     #[serde(default)]
     pub projects: Vec<Project>,
@@ -187,6 +231,11 @@ impl DeletedItem {
             wsl_path: project.wsl_path.clone(),
             default_tool: project.default_tool.clone(),
             commands: project.commands.clone(),
+            ssh_target: project.ssh_target.clone(),
+            ssh_key_file: project.ssh_key_file.clone(),
+            ssh_key_path: project.ssh_key_path.clone(),
+            ssh_password_enc: project.ssh_password_enc.clone(),
+            ssh_key_pass_enc: project.ssh_key_pass_enc.clone(),
             projects: Vec::new(),
             deleted_at,
         }
@@ -204,6 +253,11 @@ impl DeletedItem {
             wsl_path: String::new(),
             default_tool: String::new(),
             commands: Vec::new(),
+            ssh_target: String::new(),
+            ssh_key_file: String::new(),
+            ssh_key_path: String::new(),
+            ssh_password_enc: String::new(),
+            ssh_key_pass_enc: String::new(),
             projects: group.projects.clone(),
             deleted_at,
         }
@@ -470,6 +524,68 @@ mod tests {
         assert!(Project::new("a", r"E:\dev\a", "").has_windows_path());
         assert!(!Project::new("a", "/mnt/e/a", "").has_windows_path());
         assert!(!Project::new("a", "", "").has_windows_path());
+    }
+
+    #[test]
+    fn ssh_project_detection_and_windows_path() {
+        let mut p = Project::new("srv", "", "");
+        assert!(!p.is_ssh_project());
+        p.ssh_target = "abc@172.16.14.10".into();
+        p.path = "/opt/foo".into();
+        assert!(p.is_ssh_project());
+        // 远程 Linux 路径天然无 Windows 路径：PowerShell/IDE/Explorer 自动不可用。
+        assert!(!p.has_windows_path());
+        assert_eq!(p.linux_path(), "/opt/foo");
+    }
+
+    #[test]
+    fn ssh_fields_legacy_json_defaults() {
+        let json = r#"{"groups":[{"name":"G","projects":[{"name":"srv","sshTarget":"abc@h","path":"/opt/x"}]}]}"#;
+        let data: ProjectData = serde_json::from_str(json).unwrap();
+        let p = &data.groups[0].projects[0];
+        assert!(p.is_ssh_project());
+        assert_eq!(p.ssh_target, "abc@h");
+        assert!(p.ssh_key_file.is_empty());
+        assert!(p.ssh_key_path.is_empty());
+        assert!(p.ssh_password_enc.is_empty());
+        assert!(p.ssh_key_pass_enc.is_empty());
+    }
+
+    #[test]
+    fn ssh_fields_serde_names_round_trip() {
+        let mut p = Project::new("srv", "/opt/x", "");
+        p.ssh_target = "abc@h:2222".into();
+        p.ssh_key_file = "keys/abc.key".into();
+        p.ssh_key_path = r"C:\keys\id_ed25519".into();
+        p.ssh_password_enc = "PWENC".into();
+        p.ssh_key_pass_enc = "KPENC".into();
+        let out = serde_json::to_value(&p).unwrap();
+        assert_eq!(out["sshTarget"], "abc@h:2222");
+        assert_eq!(out["sshKeyFile"], "keys/abc.key");
+        assert_eq!(out["sshKeyPath"], r"C:\keys\id_ed25519");
+        assert_eq!(out["sshPasswordEnc"], "PWENC");
+        assert_eq!(out["sshKeyPassEnc"], "KPENC");
+        let back: Project = serde_json::from_value(out).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn deleted_item_keeps_ssh_snapshot() {
+        let mut p = Project::new("srv", "/opt/x", "");
+        p.ssh_target = "abc@h".into();
+        p.ssh_key_file = "keys/k.key".into();
+        p.ssh_password_enc = "PWENC".into();
+        let item = DeletedItem::from_project(&p, "G", 123);
+        assert_eq!(item.ssh_target, "abc@h");
+        assert_eq!(item.ssh_key_file, "keys/k.key");
+        assert_eq!(item.ssh_password_enc, "PWENC");
+        // 分组快照不携带 SSH 秘密（projects 内部项目自带完整字段）。
+        let mut g = Group::new("G");
+        g.projects.push(p.clone());
+        let gi = DeletedItem::from_group(&g, 123);
+        assert!(gi.ssh_target.is_empty());
+        let json = serde_json::to_value(&gi).unwrap();
+        assert_eq!(json["projects"][0]["sshTarget"], "abc@h");
     }
 
     #[test]

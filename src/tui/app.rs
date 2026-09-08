@@ -3,6 +3,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::config::{AppConfig, ConfigEnv};
 use crate::menu::LaunchOption;
 use crate::models::{Project, ProjectData};
+use crate::secret;
 use crate::tui::actions;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -106,8 +107,18 @@ pub enum ConfirmKind {
 
 #[derive(Clone, Debug)]
 pub enum FormField {
-    Text { label: String, value: String },
-    Button { label: String },
+    Text {
+        label: String,
+        value: String,
+    },
+    /// 密码输入：value 存明文，渲染为星号掩码。
+    Password {
+        label: String,
+        value: String,
+    },
+    Button {
+        label: String,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -176,6 +187,16 @@ pub enum Mode {
     Confirm {
         message: String,
         kind: ConfirmKind,
+    },
+    /// 查看项目的保存密码/口令：PIN 验证通过后显示明文。
+    SecretViewer {
+        group: String,
+        project_id: String,
+        pin_input: String,
+        attempts: u8,
+        /// 验证通过后的 (登录密码, 私钥口令)；未验证为 None。
+        revealed: Option<(Option<String>, Option<String>)>,
+        error: Option<String>,
     },
     Filter,
     Help,
@@ -467,6 +488,13 @@ impl App {
         }
     }
 
+    fn password_field(label: &str) -> FormField {
+        FormField::Password {
+            label: label.into(),
+            value: String::new(),
+        }
+    }
+
     fn button_field(label: &str) -> FormField {
         FormField::Button {
             label: label.into(),
@@ -490,12 +518,32 @@ impl App {
             Self::text_field("Windows 路径", path),
             Self::button_field("浏览文件夹…"),
             Self::text_field("WSL 路径", wsl_path),
+            Self::text_field("SSH 目标（留空为普通项目）", ""),
+            Self::text_field("远程 Linux 路径", ""),
         ]
+    }
+
+    /// 编辑表单：SSH 项目用 SSH 专用字段；普通项目附 SSH 转换字段。
+    fn project_edit_fields(p: &Project) -> Vec<FormField> {
+        if p.is_ssh_project() {
+            return vec![
+                Self::text_field("SSH 目标", &p.ssh_target),
+                Self::text_field("远程 Linux 路径", &p.path),
+                Self::text_field("私钥来源路径（填路径导入替换，留空不变）", &p.ssh_key_path),
+                Self::password_field("登录密码（留空不改）"),
+                Self::password_field("私钥口令（留空不改）"),
+            ];
+        }
+        let mut fields = Self::project_form_fields(&p.name, &p.alias, &p.path, &p.wsl_path);
+        fields[5] = Self::text_field("SSH 目标（填入即转为 SSH 项目）", "");
+        fields
     }
 
     fn field_value(fields: &[FormField], index: usize) -> String {
         match fields.get(index) {
-            Some(FormField::Text { value, .. }) => value.clone(),
+            Some(FormField::Text { value, .. } | FormField::Password { value, .. }) => {
+                value.clone()
+            }
             _ => String::new(),
         }
     }
@@ -504,6 +552,157 @@ impl App {
         if let Mode::Form { error: slot, .. } = &mut self.mode {
             *slot = Some(error.into());
         }
+    }
+
+    /// 打开「查看保存的秘密」对话框（仅 SSH 项目且已存秘密、已设 PIN）。
+    fn open_secret_viewer(&mut self, data: &ProjectData, config: &AppConfig) {
+        let RightPane::Projects = self.right_pane else {
+            self.flash("请先选择项目");
+            return;
+        };
+        let Some(gi) = self.left_is_group(data, self.left_sel) else {
+            return;
+        };
+        let indices = self.filtered_project_indices(data, gi);
+        let Some(&pi) = indices.get(self.right_sel) else {
+            return;
+        };
+        let p = &data.groups[gi].projects[pi];
+        if !p.is_ssh_project() {
+            self.flash("仅 SSH 项目支持查看保存的秘密");
+            return;
+        }
+        if p.ssh_password_enc.trim().is_empty() && p.ssh_key_pass_enc.trim().is_empty() {
+            self.flash("该项目未保存密码或口令");
+            return;
+        }
+        if config.pin.is_none() {
+            self.flash("尚未设置 PIN，请先在终端运行 `pcs pin set`");
+            return;
+        }
+        self.mode = Mode::SecretViewer {
+            group: data.groups[gi].name.clone(),
+            project_id: p.id.clone(),
+            pin_input: String::new(),
+            attempts: 0,
+            revealed: None,
+            error: None,
+        };
+    }
+
+    fn handle_secret_viewer(
+        &mut self,
+        key: KeyEvent,
+        data: &mut ProjectData,
+        config: &mut AppConfig,
+    ) -> Outcome {
+        let Mode::SecretViewer {
+            group,
+            project_id,
+            pin_input,
+            attempts,
+            revealed,
+            error: _,
+        } = self.mode.clone()
+        else {
+            return Outcome::Continue;
+        };
+        match key.code {
+            KeyCode::Esc => self.back_to_browse(),
+            KeyCode::Enter => {
+                if revealed.is_some() {
+                    self.back_to_browse();
+                    return Outcome::Continue;
+                }
+                let Some(record) = config.pin.clone() else {
+                    self.back_to_browse();
+                    return Outcome::Continue;
+                };
+                match secret::verify_pin(&pin_input, &record) {
+                    Ok(true) => {
+                        let revealed =
+                            actions::find_project_ref(data, &group, &project_id).map(|p| {
+                                (
+                                    (!p.ssh_password_enc.trim().is_empty())
+                                        .then(|| secret::unprotect(&p.ssh_password_enc).ok())
+                                        .flatten(),
+                                    (!p.ssh_key_pass_enc.trim().is_empty())
+                                        .then(|| secret::unprotect(&p.ssh_key_pass_enc).ok())
+                                        .flatten(),
+                                )
+                            });
+                        match revealed {
+                            Some(revealed) => {
+                                self.mode = Mode::SecretViewer {
+                                    group,
+                                    project_id,
+                                    pin_input: String::new(),
+                                    attempts,
+                                    revealed: Some(revealed),
+                                    error: None,
+                                };
+                            }
+                            None => {
+                                self.back_to_browse();
+                                self.flash("项目已被删除");
+                            }
+                        }
+                    }
+                    Ok(false) => {
+                        let attempts = attempts + 1;
+                        if attempts >= 3 {
+                            self.back_to_browse();
+                            self.flash("PIN 验证失败");
+                        } else {
+                            self.mode = Mode::SecretViewer {
+                                group,
+                                project_id,
+                                pin_input: String::new(),
+                                attempts,
+                                revealed: None,
+                                error: Some(format!("PIN 不正确，剩余 {} 次", 3 - attempts)),
+                            };
+                        }
+                    }
+                    Err(e) => {
+                        self.mode = Mode::SecretViewer {
+                            group,
+                            project_id,
+                            pin_input,
+                            attempts,
+                            revealed: None,
+                            error: Some(e),
+                        };
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                let mut pin_input = pin_input;
+                pin_input.pop();
+                self.mode = Mode::SecretViewer {
+                    group,
+                    project_id,
+                    pin_input,
+                    attempts,
+                    revealed: None,
+                    error: None,
+                };
+            }
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                let mut pin_input = pin_input;
+                pin_input.push(c);
+                self.mode = Mode::SecretViewer {
+                    group,
+                    project_id,
+                    pin_input,
+                    attempts,
+                    revealed: None,
+                    error: None,
+                };
+            }
+            _ => {}
+        }
+        Outcome::Continue
     }
 
     pub fn open_launch_picker(
@@ -571,6 +770,7 @@ impl App {
             Mode::ListPicker { .. } => self.handle_list_picker(key, data, config),
             Mode::Form { .. } => self.handle_form(key, data, config),
             Mode::Confirm { .. } => self.handle_confirm(key, data, config),
+            Mode::SecretViewer { .. } => self.handle_secret_viewer(key, data, config),
             Mode::Filter => self.handle_filter(key, data, config),
             Mode::Help => {
                 if matches!(
@@ -601,6 +801,10 @@ impl App {
             }
             KeyCode::Char('/') => {
                 self.mode = Mode::Filter;
+                return Outcome::Continue;
+            }
+            KeyCode::Char('v') => {
+                self.open_secret_viewer(data, config);
                 return Outcome::Continue;
             }
             KeyCode::Esc => {
@@ -940,7 +1144,7 @@ impl App {
                     let p = &data.groups[gi].projects[pi];
                     self.open_form(
                         "编辑项目",
-                        Self::project_form_fields(&p.name, &p.alias, &p.path, &p.wsl_path),
+                        Self::project_edit_fields(p),
                         FormKind::EditProject {
                             group: data.groups[gi].name.clone(),
                             project_id: p.id.clone(),
@@ -1365,12 +1569,7 @@ impl App {
                     if let Some(project) = actions::find_project_ref(data, &group, &project_id) {
                         self.open_form(
                             "编辑项目",
-                            Self::project_form_fields(
-                                &project.name,
-                                &project.alias,
-                                &project.path,
-                                &project.wsl_path,
-                            ),
+                            Self::project_edit_fields(project),
                             FormKind::EditProject {
                                 group,
                                 project_id,
@@ -1690,7 +1889,9 @@ impl App {
                 };
             }
             KeyCode::Backspace => {
-                if let Some(FormField::Text { value, .. }) = fields.get_mut(focus) {
+                if let Some(FormField::Text { value, .. } | FormField::Password { value, .. }) =
+                    fields.get_mut(focus)
+                {
                     value.pop();
                 }
                 self.mode = Mode::Form {
@@ -1702,7 +1903,9 @@ impl App {
                 };
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                if let Some(FormField::Text { value, .. }) = fields.get_mut(focus) {
+                if let Some(FormField::Text { value, .. } | FormField::Password { value, .. }) =
+                    fields.get_mut(focus)
+                {
                     value.push(c);
                 }
                 self.mode = Mode::Form {
@@ -1772,21 +1975,57 @@ impl App {
             FormKind::AddProject { group } => {
                 let name = Self::field_value(fields, 0);
                 let alias = Self::field_value(fields, 1);
-                let path = Self::field_value(fields, 2);
-                let wsl = Self::field_value(fields, 4);
-                actions::add_project_paths(data, &group, &name, &alias, &path, &wsl)
+                let ssh_target = Self::field_value(fields, 5);
+                if !ssh_target.trim().is_empty() {
+                    let remote = Self::field_value(fields, 6);
+                    actions::add_project_ssh(data, &group, &name, &alias, &ssh_target, &remote)
+                } else {
+                    let path = Self::field_value(fields, 2);
+                    let wsl = Self::field_value(fields, 4);
+                    actions::add_project_paths(data, &group, &name, &alias, &path, &wsl)
+                }
             }
             FormKind::EditProject {
                 group,
                 project_id,
                 old_name,
             } => {
-                let name = Self::field_value(fields, 0);
-                let alias = Self::field_value(fields, 1);
-                let path = Self::field_value(fields, 2);
-                let wsl = Self::field_value(fields, 4);
-                let _ = project_id;
-                actions::edit_project(data, &group, &old_name, &name, &alias, &path, &wsl)
+                let is_ssh = actions::find_project_ref(data, &group, &project_id)
+                    .map(|p| p.is_ssh_project())
+                    .unwrap_or(false);
+                if is_ssh {
+                    // SSH 编辑表单：0 目标 1 远程路径 2 密钥来源 3 密码 4 口令
+                    let target = Self::field_value(fields, 0);
+                    let remote = Self::field_value(fields, 1);
+                    let key_source = Self::field_value(fields, 2);
+                    let password = Self::field_value(fields, 3);
+                    let key_pass = Self::field_value(fields, 4);
+                    actions::edit_project_ssh(
+                        data,
+                        &group,
+                        &project_id,
+                        &target,
+                        &remote,
+                        &key_source,
+                        &password,
+                        &key_pass,
+                    )
+                } else {
+                    let name = Self::field_value(fields, 0);
+                    let alias = Self::field_value(fields, 1);
+                    let path = Self::field_value(fields, 2);
+                    let wsl = Self::field_value(fields, 4);
+                    let base =
+                        actions::edit_project(data, &group, &old_name, &name, &alias, &path, &wsl);
+                    // 普通项目表单填了 SSH 目标即转换为 SSH 项目
+                    let ssh_target = Self::field_value(fields, 5);
+                    if base.is_ok() && !ssh_target.trim().is_empty() {
+                        let remote = Self::field_value(fields, 6);
+                        actions::set_ssh_target(data, &group, &project_id, &ssh_target, &remote)
+                    } else {
+                        base
+                    }
+                }
             }
             FormKind::AddCommand {
                 group,
@@ -2594,5 +2833,104 @@ mod tests {
             app.handle(key(KeyCode::Enter), &mut data, &mut config),
             Outcome::PickFolder
         ));
+    }
+
+    #[test]
+    fn add_ssh_project_via_form() {
+        // 提交会经 actions::save_data 写真实数据根：把 APPDATA 指向临时目录，
+        // 避免污染 projects.json（并发下 rename 也可能冲突导致保存失败）。
+        let temp_appdata =
+            std::env::temp_dir().join(format!("pcs_tui_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_appdata).unwrap();
+        let saved_appdata = std::env::var_os("APPDATA");
+        unsafe { std::env::set_var("APPDATA", &temp_appdata) };
+
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.left_sel = 0;
+        app.sync_right_pane(&data);
+        app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
+        // 字段 0：项目名
+        for c in "srv".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        // Tab 到字段 5（SSH 目标）
+        for _ in 0..5 {
+            app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        }
+        for c in "abc@172.16.14.10".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        for c in "/opt/x".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        app.handle(key(KeyCode::Enter), &mut data, &mut config);
+        match &app.mode {
+            Mode::Browse => {}
+            other => panic!("提交成功应回浏览模式，实际 {other:?}"),
+        }
+        let p = &data.groups[0].projects[1];
+        assert!(p.is_ssh_project());
+        assert_eq!(p.ssh_target, "abc@172.16.14.10");
+        assert_eq!(p.path, "/opt/x");
+        assert!(p.wsl_path.is_empty());
+
+        // 还原 APPDATA 并清理临时数据根
+        unsafe {
+            match saved_appdata {
+                Some(value) => std::env::set_var("APPDATA", value),
+                None => std::env::remove_var("APPDATA"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp_appdata);
+    }
+
+    #[test]
+    fn edit_ssh_project_uses_ssh_form() {
+        let mut data = sample();
+        {
+            let p = &mut data.groups[0].projects[0];
+            p.ssh_target = "abc@h".into();
+            p.path = "/opt/x".into();
+            p.ssh_password_enc = "PWENC".into();
+        }
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.left_sel = 0;
+        app.sync_right_pane(&data);
+        app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
+        match &app.mode {
+            Mode::Form { fields, .. } => {
+                assert_eq!(fields.len(), 5, "SSH 编辑表单 5 字段");
+                assert_eq!(App::field_value(fields, 0), "abc@h");
+                assert_eq!(App::field_value(fields, 1), "/opt/x");
+                assert!(matches!(fields[3], FormField::Password { .. }));
+                assert!(matches!(fields[4], FormField::Password { .. }));
+                assert!(App::field_value(fields, 3).is_empty(), "密码初始为空");
+            }
+            other => panic!("expected SSH form, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn edit_normal_project_shows_ssh_conversion_fields() {
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.left_sel = 0;
+        app.sync_right_pane(&data);
+        app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
+        match &app.mode {
+            Mode::Form { fields, .. } => {
+                assert_eq!(fields.len(), 7, "普通编辑表单含 SSH 转换字段");
+                assert_eq!(App::field_value(fields, 5), "");
+            }
+            other => panic!("expected form, got {other:?}"),
+        }
     }
 }

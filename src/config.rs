@@ -25,6 +25,9 @@ pub struct AppConfig {
     pub wsl: Vec<Tool>,
     pub powershell: Vec<Tool>,
     pub ide: Vec<Tool>,
+    /// PIN 校验记录（PBKDF2 哈希，非 PIN 本身）；未设置时为 None 且不写盘。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pin: Option<crate::secret::PinRecord>,
 }
 
 impl Default for AppConfig {
@@ -46,6 +49,7 @@ impl AppConfig {
                 Tool::new("cursor-agent", "cursor-agent"),
             ],
             ide: vec![Tool::new("VS Code", "code"), Tool::new("Cursor", "cursor")],
+            pin: None,
         }
     }
 }
@@ -189,6 +193,19 @@ fn parse_config(value: &serde_json::Value) -> AppConfig {
         wsl: parse_tools(value, "wsl"),
         powershell: parse_tools(value, "powershell"),
         ide: parse_tools(value, "ide"),
+        pin: parse_pin(value),
+    }
+}
+
+/// 解析顶层 `pin` 校验记录；缺失或损坏返回 None（仅警告，不影响工具配置）。
+fn parse_pin(value: &serde_json::Value) -> Option<crate::secret::PinRecord> {
+    let pin_value = value.get("pin")?;
+    match serde_json::from_value::<crate::secret::PinRecord>(pin_value.clone()) {
+        Ok(record) => Some(record),
+        Err(_) => {
+            eprintln!("config.json: `pin` 字段损坏，已忽略（需重新 pcs pin set）。");
+            None
+        }
     }
 }
 
@@ -544,12 +561,52 @@ mod tests {
     }
 
     #[test]
+    fn pin_round_trip_and_absent_skipped() {
+        let dir = temp_dir();
+        // 未设 PIN：config.json 不含 pin 键
+        let config = AppConfig::defaults();
+        assert!(config.pin.is_none());
+        assert!(Config::save_to_dir(&dir, &config));
+        let text = std::fs::read_to_string(dir.join("config.json")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert!(value.get("pin").is_none(), "None 时不应写出 pin 键");
+        // 设置 PIN：round trip 保留
+        let mut config = AppConfig::defaults();
+        config.pin = Some(crate::secret::PinRecord {
+            salt: "AAAA".into(),
+            iterations: 600_000,
+            hash: "BBBB".into(),
+        });
+        assert!(Config::save_to_dir(&dir, &config));
+        let loaded = Config::load_from_dir(&dir);
+        assert_eq!(loaded.pin.as_ref().unwrap().hash, "BBBB");
+        assert_eq!(loaded.pin.as_ref().unwrap().iterations, 600_000);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_pin_ignored() {
+        let dir = temp_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("config.json"),
+            r#"{"wsl":[],"powershell":[],"ide":[],"pin":{"bad":"shape"}}"#,
+        )
+        .unwrap();
+        let config = Config::load_from_dir(&dir);
+        assert!(config.pin.is_none());
+        assert!(config.ide.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn save_then_load_empty_envs() {
         let dir = temp_dir();
         let config = AppConfig {
             wsl: Vec::new(),
             powershell: Vec::new(),
             ide: Vec::new(),
+            pin: None,
         };
         assert!(Config::save_to_dir(&dir, &config));
         assert_eq!(Config::load_from_dir(&dir), config);

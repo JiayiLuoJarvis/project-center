@@ -46,6 +46,12 @@ pub fn render(frame: &mut Frame, app: &App, data: &ProjectData, config: &AppConf
         } => render_modal_list(frame, area, title, items, *selected),
         Mode::Help => render_help(frame, area),
         Mode::Confirm { message, .. } => render_confirm(frame, area, message),
+        Mode::SecretViewer {
+            pin_input,
+            revealed,
+            error,
+            ..
+        } => render_secret_viewer(frame, area, pin_input, revealed.as_ref(), error.as_deref()),
         Mode::Form {
             title,
             fields,
@@ -371,6 +377,86 @@ fn render_launch_picker(
     frame.render_stateful_widget(list, chunks[1], &mut state);
 }
 
+/// 查看保存的秘密：PIN 输入态 / 明文展示态。
+fn render_secret_viewer(
+    frame: &mut Frame,
+    area: Rect,
+    pin_input: &str,
+    revealed: Option<&(Option<String>, Option<String>)>,
+    error: Option<&str>,
+) {
+    let area = modal_area(area);
+    frame.render_widget(Clear, area);
+    let title = if revealed.is_some() {
+        " 保存的秘密 "
+    } else {
+        " 查看秘密 · PIN 验证 "
+    };
+    let block = Block::default()
+        .title(Span::styled(title, theme::title()))
+        .borders(Borders::ALL)
+        .border_style(theme::border(true))
+        .style(theme::panel());
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let mut lines: Vec<Line> = Vec::new();
+    match revealed {
+        None => {
+            lines.push(Line::from(Span::styled(
+                "输入 PIN 查看该项目的保存密码与口令",
+                theme::muted(),
+            )));
+            lines.push(Line::from(""));
+            let mut spans = vec![
+                Span::styled("PIN ", theme::muted()),
+                Span::styled("*".repeat(pin_input.chars().count()), theme::selected()),
+                Span::styled("█", theme::accent()),
+            ];
+            if pin_input.is_empty() {
+                spans[1] = Span::styled("（4-12 位数字）", theme::muted());
+            }
+            lines.push(Line::from(spans));
+        }
+        Some((password, key_pass)) => {
+            let row = |label: &str, value: Option<&String>| {
+                let text = match value {
+                    Some(v) => v.clone(),
+                    None => "（未设置）".to_string(),
+                };
+                Line::from(vec![
+                    Span::styled(format!("{label} "), theme::muted()),
+                    Span::styled(text, theme::base()),
+                ])
+            };
+            lines.push(row("登录密码:", password.as_ref()));
+            lines.push(row("私钥口令:", key_pass.as_ref()));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "明文仅本次显示，Enter/Esc 返回",
+                theme::muted(),
+            )));
+        }
+    }
+    if let Some(err) = error {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(err.to_string(), theme::danger())));
+    }
+    lines.push(Line::from(""));
+    let hint = if revealed.is_some() {
+        "Enter / Esc  返回"
+    } else {
+        "Enter  验证    Esc  取消（共 3 次机会）"
+    };
+    lines.push(Line::from(Span::styled(hint, theme::muted())));
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .style(theme::base()),
+        inner,
+    );
+}
+
 fn render_help(frame: &mut Frame, area: Rect) {
     let area = modal_area(area);
     frame.render_widget(Clear, area);
@@ -482,6 +568,46 @@ fn render_form(
                     ),
                     Span::styled(
                         value.clone(),
+                        if focused {
+                            theme::selected()
+                        } else {
+                            theme::base()
+                        },
+                    ),
+                ];
+                if focused {
+                    spans.push(Span::styled("█", theme::accent()));
+                }
+                lines.push(Line::from(spans));
+            }
+            FormField::Password { label, value } => {
+                let label_style = if focused {
+                    theme::accent().add_modifier(Modifier::BOLD)
+                } else {
+                    theme::muted()
+                };
+                lines.push(Line::from(Span::styled(label.clone(), label_style)));
+                let len = value.chars().count();
+                let masked = if len == 0 {
+                    "（未设置）".to_string()
+                } else {
+                    format!(
+                        "{}{}",
+                        "*".repeat(len.min(16)),
+                        if len > 16 { "…" } else { "" }
+                    )
+                };
+                let mut spans = vec![
+                    Span::styled(
+                        if focused { "▶ " } else { "  " },
+                        if focused {
+                            theme::accent()
+                        } else {
+                            theme::muted()
+                        },
+                    ),
+                    Span::styled(
+                        masked,
                         if focused {
                             theme::selected()
                         } else {

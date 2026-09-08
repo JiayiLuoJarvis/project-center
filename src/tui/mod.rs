@@ -86,10 +86,8 @@ fn loop_ui(
 }
 
 fn do_launch(project: &Project, group: &str, option: &crate::menu::LaunchOption) -> Result<()> {
-    let child = launcher::spawn_direct(project, group, option.env, &option.command)
+    let spawned = launcher::spawn_direct(project, group, option.env, &option.command)
         .map_err(anyhow::Error::msg)?;
-    if let Some(child) = child {
-        launcher::wait_direct(child).map_err(anyhow::Error::msg)?;
-    }
+    launcher::wait_spawned(spawned).map_err(anyhow::Error::msg)?;
     Ok(())
 }

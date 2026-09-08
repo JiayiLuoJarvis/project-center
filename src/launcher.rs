@@ -1,8 +1,12 @@
+use std::path::PathBuf;
 use std::process::Command;
+
+use zeroize::Zeroize;
 
 use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, SetConsoleTitleW};
 
 use crate::models::Project;
+use crate::secret;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchEnv {
@@ -10,6 +14,7 @@ pub enum LaunchEnv {
     PowerShell,
     Ide,
     Explorer,
+    Ssh,
 }
 
 impl LaunchEnv {
@@ -19,6 +24,7 @@ impl LaunchEnv {
             Self::PowerShell => "PowerShell",
             Self::Ide => "IDE",
             Self::Explorer => "文件夹",
+            Self::Ssh => "SSH",
         }
     }
 
@@ -29,6 +35,7 @@ impl LaunchEnv {
             Self::PowerShell => "ps",
             Self::Ide => "ide",
             Self::Explorer => "",
+            Self::Ssh => "ssh",
         }
     }
 
@@ -139,16 +146,157 @@ fn spawn_explorer(p: &Project) -> Result<std::process::Child, String> {
         .map_err(|e| format!("资源管理器启动失败: {e}"))
 }
 
-/// 生成子进程（不等待）：WSL/PowerShell 返回 `Some(child)` 供调用方在
-/// 「生成后、等待前」插入记录等操作后自行 `wait_direct`；
-/// IDE/资源管理器静默启动、无等待，返回 `None`。
-/// 校验 Windows 路径可用性（与旧 `launch_direct` 语义一致）。
+/// 解析 SSH 目标：`(user@host:port)` -> `(user@host, Option<port>)`。
+/// 仅当 host 部分不含 `:` 且末段为纯数字时视为端口；IPv6 目标 v1 不支持。
+fn parse_ssh_target(target: &str) -> (String, Option<String>) {
+    let target = target.trim();
+    match target.rfind(':') {
+        Some(pos) => {
+            let (host, port) = target.split_at(pos);
+            let port = &port[1..];
+            if !host.is_empty()
+                && !host.contains(':')
+                && !port.is_empty()
+                && port.bytes().all(|b| b.is_ascii_digit())
+            {
+                (host.to_string(), Some(port.to_string()))
+            } else {
+                (target.to_string(), None)
+            }
+        }
+        None => (target.to_string(), None),
+    }
+}
+
+/// 构造 ssh 参数：`[-p port] [-i key] user@host [-t "cd '<path>' 2>/dev/null; exec $SHELL"]`。
+/// 远程路径用 `;` 串联（cd 失败静默落到默认 shell，不断连）。
+fn ssh_args(target: &str, key_path: Option<&str>, remote_path: &str) -> Vec<String> {
+    let (userhost, port) = parse_ssh_target(target);
+    let mut args: Vec<String> = Vec::new();
+    if let Some(port) = port {
+        args.push("-p".into());
+        args.push(port);
+    }
+    if let Some(key) = key_path {
+        args.push("-i".into());
+        args.push(key.to_string());
+    }
+    args.push(userhost);
+    let remote = remote_path.trim();
+    if !remote.is_empty() {
+        let escaped = remote.replace('\'', "''");
+        args.push("-t".into());
+        args.push(format!("cd '{escaped}' 2>/dev/null; exec $SHELL"));
+    }
+    args
+}
+
+/// 随机 token 的 hex 编码（askpass 注入校验用）。
+fn random_token_hex() -> Result<String, String> {
+    let mut bytes = [0u8; 32];
+    secret::fill_random(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// 父进程预解密验证：所有已保存的秘密都能解开才注入 askpass env
+///（否则 force 模式下 askpass 输出空会导致认证必败且无法回退 tty 提示）。
+fn askpass_env_ok(p: &Project) -> bool {
+    let password_ok =
+        p.ssh_password_enc.trim().is_empty() || secret::unprotect(&p.ssh_password_enc).is_ok();
+    let key_pass_ok =
+        p.ssh_key_pass_enc.trim().is_empty() || secret::unprotect(&p.ssh_key_pass_enc).is_ok();
+    password_ok && key_pass_ok
+}
+
+fn spawn_ssh(p: &Project, group_name: &str) -> Result<SpawnedDirect, String> {
+    set_console_title(p, group_name);
+
+    // 私钥：解密成功才落临时文件；失败降级为不带密钥启动（回退密码/交互）。
+    let mut temp_key: Option<PathBuf> = None;
+    let mut key_arg: Option<String> = None;
+    if !p.ssh_key_file.trim().is_empty() {
+        match secret::read_key_file(&p.ssh_key_file) {
+            Ok(mut plain) => {
+                let dir = secret::data_root().join("keys_tmp");
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    eprintln!("警告：无法创建密钥临时目录（{e}），本次不带密钥启动。");
+                } else {
+                    let path = dir.join(format!("{}.key", uuid::Uuid::new_v4()));
+                    match std::fs::write(&path, plain.as_bytes()) {
+                        Ok(()) => {
+                            key_arg = Some(path.to_string_lossy().into_owned());
+                            temp_key = Some(path);
+                        }
+                        Err(e) => {
+                            eprintln!("警告：密钥临时文件写入失败（{e}），本次不带密钥启动。")
+                        }
+                    }
+                }
+                plain.zeroize();
+            }
+            Err(e) => eprintln!("警告：私钥解密失败（{e}），本次不带密钥启动。"),
+        }
+    }
+
+    let mut cmd = Command::new("ssh");
+    cmd.args(ssh_args(&p.ssh_target, key_arg.as_deref(), &p.path));
+
+    // askpass 自动填充：env 只携带项目 id 与一次性 token，秘密由 __askpass 自行解密。
+    if !askpass_env_ok(p) {
+        eprintln!("提示：保存的密码/口令解密失败，本次回退交互输入。");
+    } else if let Ok(exe) = std::env::current_exe() {
+        match random_token_hex() {
+            Ok(token) => {
+                cmd.env("SSH_ASKPASS", &exe);
+                cmd.env("SSH_ASKPASS_REQUIRE", "force");
+                cmd.env("DISPLAY", ":0");
+                cmd.env("PCS_ASKPASS_ID", &p.id);
+                cmd.env("PCS_ASKPASS_TOKEN", token);
+            }
+            Err(e) => eprintln!("警告：随机 token 生成失败（{e}），本次回退交互输入。"),
+        }
+    }
+
+    match cmd.spawn() {
+        Ok(child) => Ok(SpawnedDirect {
+            child: Some(child),
+            temp_key_path: temp_key,
+        }),
+        Err(e) => {
+            // 启动失败也要清掉刚落的临时密钥。
+            if let Some(path) = &temp_key {
+                secret::shred_and_remove(path);
+            }
+            Err(format!("SSH 启动失败: {e}"))
+        }
+    }
+}
+
+/// 一次成功 spawn 的产物：子进程（IDE/资源管理器为 `None`）与
+/// SSH 临时密钥文件路径（非 SSH 为 `None`）。
+pub struct SpawnedDirect {
+    pub child: Option<std::process::Child>,
+    /// SSH 场景的明文密钥临时文件；`wait_spawned` 退出后覆写删除。
+    pub temp_key_path: Option<PathBuf>,
+}
+
+/// 生成子进程（不等待）。校验 Windows 路径可用性（与旧 `launch_direct` 语义一致）。
+/// SSH 项目仅支持 `LaunchEnv::Ssh`；其他环境对其报错。
 pub fn spawn_direct(
     p: &Project,
     group_name: &str,
     env: LaunchEnv,
     command: &str,
-) -> Result<Option<std::process::Child>, String> {
+) -> Result<SpawnedDirect, String> {
+    if env == LaunchEnv::Ssh {
+        if !p.is_ssh_project() {
+            return Err(format!(
+                "项目 `{}` 不是 SSH 项目，不能使用 SSH 启动",
+                p.name
+            ));
+        }
+        return spawn_ssh(p, group_name);
+    }
     if matches!(
         env,
         LaunchEnv::PowerShell | LaunchEnv::Ide | LaunchEnv::Explorer
@@ -160,17 +308,45 @@ pub fn spawn_direct(
             env.label()
         ));
     }
+    if p.is_ssh_project() {
+        return Err(format!(
+            "项目 `{}` 是 SSH 远程项目，只支持 SSH 终端启动",
+            p.name
+        ));
+    }
     match env {
-        LaunchEnv::Wsl => spawn_wsl(p, group_name, command).map(Some),
-        LaunchEnv::PowerShell => spawn_powershell(p, group_name, command).map(Some),
-        LaunchEnv::Ide => spawn_ide(p, command).map(|_| None),
-        LaunchEnv::Explorer => spawn_explorer(p).map(|_| None),
+        LaunchEnv::Wsl => spawn_wsl(p, group_name, command).map(|child| SpawnedDirect {
+            child: Some(child),
+            temp_key_path: None,
+        }),
+        LaunchEnv::PowerShell => {
+            spawn_powershell(p, group_name, command).map(|child| SpawnedDirect {
+                child: Some(child),
+                temp_key_path: None,
+            })
+        }
+        LaunchEnv::Ide => spawn_ide(p, command).map(|_| SpawnedDirect {
+            child: None,
+            temp_key_path: None,
+        }),
+        LaunchEnv::Explorer => spawn_explorer(p).map(|_| SpawnedDirect {
+            child: None,
+            temp_key_path: None,
+        }),
+        LaunchEnv::Ssh => unreachable!("已在上方处理"),
     }
 }
 
-/// 等待 WSL/PowerShell 子进程退出（阻塞、抑制 Ctrl+C）。
-pub fn wait_direct(child: std::process::Child) -> Result<(), String> {
-    wait_console_child(child).map_err(|e| format!("等待子进程结束失败: {e}"))
+/// 等待子进程退出（阻塞、抑制 Ctrl+C），随后清理 SSH 临时密钥文件。
+pub fn wait_spawned(spawned: SpawnedDirect) -> Result<(), String> {
+    let result = match spawned.child {
+        Some(child) => wait_console_child(child).map_err(|e| format!("等待子进程结束失败: {e}")),
+        None => Ok(()),
+    };
+    if let Some(path) = spawned.temp_key_path {
+        secret::shred_and_remove(&path);
+    }
+    result
 }
 
 #[cfg(test)]
@@ -220,6 +396,86 @@ mod tests {
         assert_eq!(LaunchEnv::from_command_env(""), LaunchEnv::Ide);
         assert_eq!(LaunchEnv::from_command_env("bash"), LaunchEnv::Ide);
         assert_eq!(LaunchEnv::from_command_env("  "), LaunchEnv::Ide);
+    }
+
+    #[test]
+    fn ssh_env_labels() {
+        assert_eq!(LaunchEnv::Ssh.label(), "SSH");
+        assert_eq!(LaunchEnv::Ssh.short_label(), "ssh");
+    }
+
+    #[test]
+    fn parse_ssh_target_basic_port_and_ipv6_guard() {
+        assert_eq!(
+            parse_ssh_target("abc@172.16.14.10"),
+            ("abc@172.16.14.10".into(), None)
+        );
+        assert_eq!(
+            parse_ssh_target("abc@host:2222"),
+            ("abc@host".into(), Some("2222".into()))
+        );
+        assert_eq!(
+            parse_ssh_target("abc@host:22x"),
+            ("abc@host:22x".into(), None)
+        );
+        assert_eq!(parse_ssh_target(":2222"), (":2222".into(), None));
+        // IPv6 一律不拆端口（v1 不支持，但保证不拆坏目标串）
+        assert_eq!(parse_ssh_target("abc@::1"), ("abc@::1".into(), None));
+        assert_eq!(
+            parse_ssh_target("abc@[::1]:22"),
+            ("abc@[::1]:22".into(), None)
+        );
+    }
+
+    #[test]
+    fn ssh_args_bare_and_with_path() {
+        assert_eq!(
+            ssh_args("abc@172.16.14.10", None, ""),
+            vec!["abc@172.16.14.10"]
+        );
+        assert_eq!(
+            ssh_args("abc@h:2222", None, "/opt/foo"),
+            vec![
+                "-p",
+                "2222",
+                "abc@h",
+                "-t",
+                "cd '/opt/foo' 2>/dev/null; exec $SHELL"
+            ]
+        );
+        assert_eq!(
+            ssh_args("abc@h", Some("C:\\tmp\\k.key"), ""),
+            vec!["-i", "C:\\tmp\\k.key", "abc@h"]
+        );
+        // 路径含单引号转义
+        assert_eq!(
+            ssh_args("abc@h", None, "/opt/i't's"),
+            vec!["abc@h", "-t", "cd '/opt/i''t''s' 2>/dev/null; exec $SHELL"]
+        );
+    }
+
+    #[test]
+    fn askpass_env_ok_requires_all_secrets_decryptable() {
+        let mut p = Project::new("srv", "", "");
+        // 无任何秘密：env 无用但也无害（不会自动填），视为 ok
+        assert!(askpass_env_ok(&p));
+        // 密文损坏 -> 不允许注入（force 下空输出会导致认证必败）
+        p.ssh_password_enc = "broken-b64!!".into();
+        assert!(!askpass_env_ok(&p));
+        // 合法 DPAPI 密文 -> 允许
+        p.ssh_password_enc = secret::protect("pw").unwrap();
+        assert!(askpass_env_ok(&p));
+        // 口令密文损坏 -> 阻断
+        p.ssh_key_pass_enc = "!!".into();
+        assert!(!askpass_env_ok(&p));
+    }
+
+    #[test]
+    fn random_token_hex_is_64_chars() {
+        let t = random_token_hex().unwrap();
+        assert_eq!(t.len(), 64);
+        assert!(t.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_ne!(t, random_token_hex().unwrap(), "token 必须随机");
     }
 
     #[test]

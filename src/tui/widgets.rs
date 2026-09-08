@@ -8,6 +8,9 @@ use crate::tui::actions;
 use crate::tui::theme;
 
 pub fn project_item(project: &Project, config: &AppConfig) -> ListItem<'static> {
+    if project.is_ssh_project() {
+        return ssh_project_item(project);
+    }
     let path = if project.has_windows_path() {
         project.path.clone()
     } else {
@@ -40,6 +43,35 @@ pub fn project_item(project: &Project, config: &AppConfig) -> ListItem<'static> 
         Line::from(Span::styled("（无路径）", theme::muted()))
     } else {
         Line::from(Span::styled(truncate_width(&path, 60), theme::muted()))
+    };
+    ListItem::new(vec![Line::from(name_spans), path_line])
+}
+
+/// SSH 远程项目行：黄色 `SSH` 标签 + 远程路径。
+fn ssh_project_item(project: &Project) -> ListItem<'static> {
+    let mut name_spans = vec![Span::styled(project.name.clone(), theme::base())];
+    if !project.alias.trim().is_empty() {
+        name_spans.push(Span::raw(" "));
+        name_spans.push(Span::styled(
+            format!("[{}]", project.alias.trim()),
+            theme::muted(),
+        ));
+    }
+    name_spans.push(Span::raw(" "));
+    name_spans.push(Span::styled("SSH", theme::warn()));
+    let remote = format!(
+        "{}{}",
+        project.ssh_target.trim(),
+        if project.path.trim().is_empty() {
+            String::new()
+        } else {
+            format!("  → {}", project.path.trim())
+        }
+    );
+    let path_line = if remote.is_empty() {
+        Line::from(Span::styled("（无目标）", theme::muted()))
+    } else {
+        Line::from(Span::styled(truncate_width(&remote, 60), theme::muted()))
     };
     ListItem::new(vec![Line::from(name_spans), path_line])
 }

@@ -94,7 +94,18 @@ pcs group rm <分组> [--force]
 
 WSL 和 PowerShell 环境继承当前控制台的输入输出，不创建 Windows Terminal 新标签页或新控制台。启动全程无「启动 X？(Y/n)」确认。
 
-所有环境均以「发起后即退出」方式启动：pcs 用 `spawn` 启动子进程后立即返回退出，不等待子进程结束。WSL / PowerShell 会话继续挂载在原控制台窗口上运行（Windows 下父进程退出不会终止子进程），控制台标题也沿用 pcs 设置的「项目名 - 分组名」；VS Code / Cursor 则在后台静默启动。因此打开项目后 pcs 进程会立即消失，不会残留驻留。
+WSL、PowerShell 启动为「当前控制台 + 等待子进程退出（抑制 Ctrl+C）」；IDE/文件夹后台静默启动、不等待。
+
+### SSH 远程项目
+
+`sshTarget` 非空的项目为 SSH 远程项目：启动选项仅有「SSH · 终端」（当前控制台运行 `ssh.exe`，等待子进程退出）。
+
+- 启动参数：`ssh [-p 端口] [-i 临时密钥] user@host [-t "cd '<远程路径>' 2>/dev/null; exec $SHELL"]`；远程路径缺失/错误时静默落在默认 shell，不断连。
+- 秘密存储：密码/私钥口令以 DPAPI 密文存 projects.json；私钥以 DPAPI 密文存数据根 `keys\<项目id>.key`（JSON 仅存相对路径）。
+- 自动填充：已存秘密可解密时注入 `SSH_ASKPASS=<pcs 自身>`、`SSH_ASKPASS_REQUIRE=force` 与一次性 token，由隐藏子命令 `pcs __askpass` 按 prompt 回答密码/口令（不代答 host key 确认）；解密失败回退交互输入。
+- 查看保存的秘密：`pcs secret show <项目>` 或 TUI 中 `v`，需先 `pcs pin set` 设置 PIN（PBKDF2 校验哈希存 config.json）；`pcs pin change` 修改、`pcs pin reset --force` 重置（清空 PIN 与全部已存密码、口令、密钥文件）。
+- CLI：`pcs ssh <项目>` 直连；`pcs add/edit` 支持 `--ssh`、`--ssh-path`、`--ssh-key`（导入加密）与 `--password-stdin`、`--key-pass-stdin`；`pcs open -s` 等价于 SSH 启动。
+- 删除与回收站：软删保留密钥文件（可恢复）；真删（force / 回收站单项删除 / 过期清理 / 清空回收站）删除密钥文件，删除失败记入 `pendingKeyDeletes` 每次启动重试。
 
 ## 8. 验证
 
