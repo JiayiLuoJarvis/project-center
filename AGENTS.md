@@ -4,7 +4,7 @@
 
 ## Verify
 
-- `cargo test` runs inline unit tests in `src/main.rs`, `src/launcher.rs`, `src/models.rs`, `src/ops.rs`, and `src/store.rs`; use `cargo test <filter>` for a focused test.
+- `cargo test` runs inline unit tests in `src/main.rs`, `src/menu.rs`, `src/models.rs`, `src/ops.rs`, `src/store.rs`, `src/launcher.rs`, `src/config.rs`, and `src/tui/app.rs`; use `cargo test <filter>` for a focused test.
 - `cargo fmt --check`
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo build --release` produces `target\release\pcs.exe` with LTO and stripping (see `[profile.release]`).
