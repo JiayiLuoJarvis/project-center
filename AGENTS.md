@@ -4,7 +4,7 @@
 
 ## Verify
 
-- `cargo test` runs inline unit tests in `src/main.rs`, `src/menu.rs`, `src/models.rs`, `src/ops.rs`, `src/store.rs`, `src/launcher.rs`, `src/config.rs`, and `src/tui/app.rs`; use `cargo test <filter>` for a focused test.
+- `cargo test` runs inline unit tests in `src/main.rs`, `src/menu.rs`, `src/models.rs`, `src/ops.rs`, `src/store.rs`, `src/launcher.rs`, `src/config.rs`, `src/secret.rs`, and `src/tui/app.rs`; use `cargo test <filter>` for a focused test.
 - `cargo fmt --check`
 - `cargo clippy --all-targets -- -D warnings`
 - `cargo build --release` produces `target\release\pcs.exe` with LTO and stripping (see `[profile.release]`).
@@ -42,4 +42,5 @@
 - `src/models.rs`: data model, legacy serialization, and path conversion.
 - `src/store.rs`: JSON loading, id backfill, and atomic persistence.
 - `src/launcher.rs`: WSL, PowerShell, and VS Code/Cursor process launching.
+- `src/secret.rs`: DPAPI protect/unprotect, PIN (PBKDF2) management, SSH key-file storage under data root `keys\`/`keys_tmp\`, orphan-key cleanup and startup maintenance (SSH secrets).
 - `src/config.rs`: exe-dir `config.json` tools lists.
