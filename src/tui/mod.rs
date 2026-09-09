@@ -1,3 +1,5 @@
+//! 全屏 ratatui TUI：生命周期、事件循环、启动后恢复。
+
 mod actions;
 mod app;
 mod theme;
@@ -7,9 +9,9 @@ mod widgets;
 use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
-use crate::config::AppConfig;
-use crate::launcher;
-use crate::models::{Project, ProjectData};
+use crate::domain::models::{Project, ProjectData};
+use crate::launch as launcher;
+use crate::persist::AppConfig;
 use crate::tui::app::{App, Mode, Outcome};
 
 pub fn run(data: &mut ProjectData, config: &mut AppConfig) -> Result<()> {
@@ -70,7 +72,7 @@ fn loop_ui(
                 match launch_result {
                     Ok(code) => {
                         // ssh 失败退出时控制台报错一闪而过，返回 TUI 前暂停让用户看清。
-                        if code != 0 && option.env == crate::launcher::LaunchEnv::Ssh {
+                        if code != 0 && option.env == crate::launch::LaunchEnv::Ssh {
                             pause_after_ssh_failure(code);
                         }
                     }
@@ -91,7 +93,7 @@ fn loop_ui(
     }
 }
 
-fn do_launch(project: &Project, group: &str, option: &crate::menu::LaunchOption) -> Result<i32> {
+fn do_launch(project: &Project, group: &str, option: &crate::launch::LaunchOption) -> Result<i32> {
     let spawned = launcher::spawn_direct(project, group, option.env, &option.command)
         .map_err(anyhow::Error::msg)?;
     launcher::wait_spawned(spawned).map_err(anyhow::Error::msg)

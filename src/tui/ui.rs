@@ -4,8 +4,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 
-use crate::config::AppConfig;
-use crate::models::ProjectData;
+use crate::domain::models::ProjectData;
+use crate::persist::AppConfig;
 use crate::tui::app::{App, Focus, FormField, Mode, RightPane};
 use crate::tui::theme;
 use crate::tui::widgets;
@@ -321,7 +321,7 @@ fn render_modal_list(
 fn render_launch_picker(
     frame: &mut Frame,
     area: Rect,
-    options: &[crate::menu::LaunchOption],
+    options: &[crate::launch::LaunchOption],
     labels: &[String],
     selected: usize,
     filter: &str,

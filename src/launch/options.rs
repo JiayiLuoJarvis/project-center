@@ -1,6 +1,6 @@
-use crate::config::AppConfig;
-use crate::launcher::LaunchEnv;
-use crate::models::Project;
+use crate::domain::models::Project;
+use crate::launch::LaunchEnv;
+use crate::persist::AppConfig;
 
 /// 单个可启动选项：环境 + 工具名 + 启动命令（终端命令为空串）。
 #[derive(Clone, Debug)]
@@ -121,8 +121,8 @@ pub fn default_first(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::AppConfig;
-    use crate::models::ProjectCommand;
+    use crate::domain::models::ProjectCommand;
+    use crate::persist::AppConfig;
 
     fn cfg() -> AppConfig {
         AppConfig::defaults()

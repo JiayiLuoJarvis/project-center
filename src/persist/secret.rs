@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use zeroize::Zeroize;
 
-use crate::models::ProjectData;
+use crate::domain::models::ProjectData;
 
 /// base64 标准编码（无依赖；秘密字段量小，性能无关紧要）。
 pub fn b64_encode(data: &[u8]) -> String {
@@ -293,7 +293,7 @@ pub fn verify_pin(pin: &str, record: &PinRecord) -> Result<bool, String> {
 
 /// 数据根目录（projects.json 所在目录）。
 pub fn data_root() -> PathBuf {
-    crate::store::Store::file_path()
+    crate::persist::Store::file_path()
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."))
@@ -492,7 +492,7 @@ pub fn startup_maintenance(data: &mut ProjectData, allow_orphan_sweep: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{DeletedItem, Group, Project, ProjectData};
+    use crate::domain::models::{DeletedItem, Group, Project, ProjectData};
 
     fn temp_root() -> PathBuf {
         let stamp = std::time::SystemTime::now()

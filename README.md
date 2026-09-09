@@ -28,6 +28,8 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
 
+CI 在 GitHub Actions：Windows 跑上述检查，Linux 跑 `cargo deny check`。
+
 ## 使用
 
 ```text

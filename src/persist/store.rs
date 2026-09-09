@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::models::{ProjectData, current_unix_ts, format_utc_compact};
+use crate::domain::models::{ProjectData, current_unix_ts, format_utc_compact};
 
 /// 备份文件轮转上限：超出后删除最旧的备份。
 pub const MAX_BACKUPS: usize = 10;
@@ -32,7 +32,14 @@ impl Store {
     /// release：`%APPDATA%\project_center\projects.json`；
     /// debug：`%APPDATA%\project_center_dev\projects.json`。
     /// APPDATA 缺失时回退 `%USERPROFILE%`（或 `HOME`）下对应的点目录。
+    /// `PCS_DATA_DIR` 若非空，则该目录即为数据根（测试/CI 用，不改变默认行为）。
     pub fn file_path() -> PathBuf {
+        if let Some(dir) = std::env::var_os("PCS_DATA_DIR") {
+            let s = dir.to_string_lossy();
+            if !s.trim().is_empty() {
+                return PathBuf::from(dir).join("projects.json");
+            }
+        }
         if let Some(appdata) = std::env::var_os("APPDATA") {
             let s = appdata.to_string_lossy();
             if !s.trim().is_empty() {
@@ -53,12 +60,12 @@ impl Store {
         let path = Self::file_path();
         let (mut data, backfilled, recovered) = Self::load_from_inner(&path);
         // 超过保留期的回收站项自动清理。
-        let purged = crate::ops::purge_expired_trash(&mut data);
+        let purged = crate::domain::purge_expired_trash(&mut data);
         // 数据退化（损坏且无备份、或从备份恢复）时引用集不可信，
         // 绝不做孤儿 key 清理，否则会把全部密文 sidecar 当孤儿销毁。
         let allow_orphan_sweep = !recovered && orphan_sweep_allowed(&data);
         // 秘密维护：pendingKeyDeletes 重试、孤儿 key 清理、tmp 残留清理。
-        let maintained = crate::secret::startup_maintenance(&mut data, allow_orphan_sweep);
+        let maintained = crate::persist::startup_maintenance(&mut data, allow_orphan_sweep);
         // 回填 id / 损坏恢复 / 清理过期项后立即写回，避免只读命令丢恢复结果。
         if backfilled || recovered || purged || maintained {
             let _ = Self::save_to(&data, &path);
@@ -281,15 +288,24 @@ pub(crate) mod test_env {
     }
 
     /// 把 APPDATA 指向临时目录；Drop 时恢复原值（断言失败也不残留）。
+    /// 同时清掉 `PCS_DATA_DIR`，避免测试缝盖过 APPDATA 语义。
     pub struct AppdataGuard {
         saved: Option<std::ffi::OsString>,
+        saved_data_dir: Option<std::ffi::OsString>,
     }
 
     impl AppdataGuard {
         pub fn redirect(dir: &Path) -> Self {
             let saved = std::env::var_os("APPDATA");
-            unsafe { std::env::set_var("APPDATA", dir) };
-            Self { saved }
+            let saved_data_dir = std::env::var_os("PCS_DATA_DIR");
+            unsafe {
+                std::env::set_var("APPDATA", dir);
+                std::env::remove_var("PCS_DATA_DIR");
+            }
+            Self {
+                saved,
+                saved_data_dir,
+            }
         }
     }
 
@@ -300,6 +316,36 @@ pub(crate) mod test_env {
                     Some(value) => std::env::set_var("APPDATA", value),
                     None => std::env::remove_var("APPDATA"),
                 }
+                match self.saved_data_dir.take() {
+                    Some(value) => std::env::set_var("PCS_DATA_DIR", value),
+                    None => std::env::remove_var("PCS_DATA_DIR"),
+                }
+            }
+        }
+    }
+
+    /// 把 `PCS_CONFIG_PATH` 指向指定文件；Drop 时恢复。须与 `lock_appdata` 同用。
+    pub struct ConfigPathGuard {
+        saved: Option<std::ffi::OsString>,
+    }
+
+    impl ConfigPathGuard {
+        pub fn redirect(path: &Path) -> Self {
+            let saved = std::env::var_os("PCS_CONFIG_PATH");
+            unsafe {
+                std::env::set_var("PCS_CONFIG_PATH", path);
+            }
+            Self { saved }
+        }
+    }
+
+    impl Drop for ConfigPathGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.saved.take() {
+                    Some(value) => std::env::set_var("PCS_CONFIG_PATH", value),
+                    None => std::env::remove_var("PCS_CONFIG_PATH"),
+                }
             }
         }
     }
@@ -308,7 +354,7 @@ pub(crate) mod test_env {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::{Group, Project, ProjectData};
+    use crate::domain::models::{Group, Project, ProjectData};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_path() -> PathBuf {
@@ -321,6 +367,8 @@ mod tests {
 
     #[test]
     fn file_path_matches_build_profile() {
+        let _lock = test_env::lock_appdata();
+        let _guard = test_env::AppdataGuard::redirect(&temp_path());
         let path = Store::file_path();
         assert!(
             path.ends_with("projects.json"),
@@ -430,6 +478,24 @@ mod tests {
     }
 
     #[test]
+    fn pcs_data_dir_overrides_appdata() {
+        let _lock = test_env::lock_appdata();
+        let dir = temp_path();
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = std::env::var_os("PCS_DATA_DIR");
+        unsafe { std::env::set_var("PCS_DATA_DIR", &dir) };
+        let path = Store::file_path();
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("PCS_DATA_DIR", value),
+                None => std::env::remove_var("PCS_DATA_DIR"),
+            }
+        }
+        assert_eq!(path, dir.join("projects.json"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn load_missing_returns_empty() {
         let dir = temp_path();
         let path = dir.join("nope").join("projects.json");
@@ -463,7 +529,7 @@ mod tests {
         assert!(orphan_sweep_allowed(&data));
         // 仅有回收站快照也可信
         let mut data = ProjectData::default();
-        data.trash.push(crate::models::DeletedItem {
+        data.trash.push(crate::domain::models::DeletedItem {
             kind: "project".into(),
             ..Default::default()
         });

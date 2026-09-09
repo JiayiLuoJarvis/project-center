@@ -24,14 +24,17 @@
 
 ## 3. 项目结构
 
+单 crate：薄 `src/main.rs` + `src/lib.rs`。交互层为 ratatui 全屏 TUI（见 `docs/superpowers/specs/2026-09-03-ratatui-tui-design.md`）。
+
 ```
 src/
-├── main.rs       # clap 命令定义与分发
-├── menu.rs       # 分组/项目/项目操作与两级启动选择菜单
-├── ops.rs        # 项目与分组的纯数据操作、同名解析
-├── models.rs     # 数据模型、JSON 序列化、路径互转
-├── store.rs      # JSON 读取与原子写入
-└── launcher.rs   # WSL、PowerShell、opencode、cursor-agent、VS Code、Cursor、资源管理器启动
+├── main.rs           # 调用 pcs::cli::run()
+├── lib.rs            # 库根
+├── cli/              # clap 与子命令
+├── domain/           # 模型、查找、CRUD
+├── persist/          # store / config / secret
+├── launch/           # 启动选项与进程
+└── tui/              # ratatui 状态机与绘制
 ```
 
 ## 4. 数据与路径

@@ -1,8 +1,12 @@
-use crate::config::{AppConfig, Config, ConfigEnv, add_tool, edit_tool, remove_tool, reset_config};
-use crate::menu::{LaunchOption, build_launch_options, default_first};
-use crate::models::{Project, ProjectData, format_date, is_wsl_path, normalize, win_path_to_linux};
-use crate::ops;
-use crate::store::Store;
+use crate::domain as ops;
+use crate::domain::models::{
+    Project, ProjectData, format_date, is_wsl_path, normalize, win_path_to_linux,
+};
+use crate::launch::{LaunchOption, build_launch_options, default_first};
+use crate::persist::Store;
+use crate::persist::{
+    AppConfig, Config, ConfigEnv, add_tool, edit_tool, remove_tool, reset_config,
+};
 
 pub fn save_data(data: &ProjectData) -> Result<(), String> {
     if Store::save(data) {
@@ -20,7 +24,7 @@ pub fn save_config(config: &AppConfig) -> Result<(), String> {
     }
 }
 
-pub fn trash_label(item: &crate::models::DeletedItem) -> String {
+pub fn trash_label(item: &crate::domain::models::DeletedItem) -> String {
     if item.is_group() {
         format!("[分组] {} ({} 个项目)", item.name, item.projects.len())
     } else {
@@ -33,11 +37,11 @@ pub fn trash_label(item: &crate::models::DeletedItem) -> String {
     }
 }
 
-pub fn command_label(command: &crate::models::ProjectCommand) -> String {
+pub fn command_label(command: &crate::domain::models::ProjectCommand) -> String {
     format!(
         "{} ({} {})",
         command.name,
-        crate::launcher::LaunchEnv::from_command_env(&command.env).short_label(),
+        crate::launch::LaunchEnv::from_command_env(&command.env).short_label(),
         command.command
     )
 }
@@ -161,19 +165,19 @@ fn prepare_form_secrets(
         if plain.trim().is_empty() {
             return Err("私钥文件为空".into());
         }
-        Some(crate::secret::write_key_file(project_id, &plain)?)
+        Some(crate::persist::write_key_file(project_id, &plain)?)
     } else {
         None
     };
     let password_enc = if password.is_empty() {
         None
     } else {
-        Some(crate::secret::protect(password)?)
+        Some(crate::persist::protect(password)?)
     };
     let key_pass_enc = if key_pass.is_empty() {
         None
     } else {
-        Some(crate::secret::protect(key_pass)?)
+        Some(crate::persist::protect(key_pass)?)
     };
     Ok(FormSecrets {
         key_file,

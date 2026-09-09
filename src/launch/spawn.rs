@@ -5,8 +5,8 @@ use zeroize::Zeroize;
 
 use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, SetConsoleTitleW};
 
-use crate::models::Project;
-use crate::secret;
+use crate::domain::models::Project;
+use crate::persist as secret;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LaunchEnv {
@@ -407,32 +407,29 @@ pub fn spawn_direct(
     group_name: &str,
     env: LaunchEnv,
     command: &str,
-) -> Result<SpawnedDirect, String> {
+) -> super::Result<SpawnedDirect> {
     if env == LaunchEnv::Ssh {
         if !p.is_ssh_project() {
-            return Err(format!(
-                "项目 `{}` 不是 SSH 项目，不能使用 SSH 启动",
-                p.name
-            ));
+            return Err(super::Error::NotSshProject {
+                name: p.name.clone(),
+            });
         }
-        return spawn_ssh(p, group_name);
+        return spawn_ssh(p, group_name).map_err(super::Error::from);
     }
     if matches!(
         env,
         LaunchEnv::PowerShell | LaunchEnv::Ide | LaunchEnv::Explorer
     ) && !p.has_windows_path()
     {
-        return Err(format!(
-            "项目 `{}` 没有 Windows 路径，不能使用 {}",
-            p.name,
-            env.label()
-        ));
+        return Err(super::Error::NoWindowsPath {
+            name: p.name.clone(),
+            env: env.label().to_string(),
+        });
     }
     if p.is_ssh_project() {
-        return Err(format!(
-            "项目 `{}` 是 SSH 远程项目，只支持 SSH 终端启动",
-            p.name
-        ));
+        return Err(super::Error::SshOnly {
+            name: p.name.clone(),
+        });
     }
     match env {
         LaunchEnv::Wsl => spawn_wsl(p, group_name, command).map(|child| SpawnedDirect {
@@ -459,14 +456,16 @@ pub fn spawn_direct(
         }),
         LaunchEnv::Ssh => unreachable!("已在上方处理"),
     }
+    .map_err(super::Error::from)
 }
 
 /// 等待子进程退出（阻塞、抑制 Ctrl+C），随后清理 SSH 临时密钥与
 /// askpass token 校验文件（成功/失败/中断都走）。返回子进程退出码
 /// （无子进程为 0；被信号终止为 -1）。
-pub fn wait_spawned(spawned: SpawnedDirect) -> Result<i32, String> {
+pub fn wait_spawned(spawned: SpawnedDirect) -> super::Result<i32> {
     let result = match spawned.child {
-        Some(child) => wait_console_child(child).map_err(|e| format!("等待子进程结束失败: {e}")),
+        Some(child) => wait_console_child(child)
+            .map_err(|e| super::Error::from(format!("等待子进程结束失败: {e}"))),
         None => Ok(0),
     };
     if let Some(path) = spawned.temp_key_path {

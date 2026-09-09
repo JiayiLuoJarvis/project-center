@@ -2,8 +2,8 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::ListItem;
 
-use crate::config::AppConfig;
-use crate::models::{DeletedItem, Project};
+use crate::domain::models::{DeletedItem, Project};
+use crate::persist::AppConfig;
 use crate::tui::actions;
 use crate::tui::theme;
 
@@ -31,7 +31,7 @@ pub fn project_item(project: &Project, config: &AppConfig) -> ListItem<'static> 
             format!(" {}", project.default_tool),
             theme::success(),
         ));
-    } else if let Some(first) = crate::menu::build_launch_options(project, config).first() {
+    } else if let Some(first) = crate::launch::build_launch_options(project, config).first() {
         name_spans.push(Span::raw(" "));
         name_spans.push(Span::styled(first.tool_name.clone(), theme::muted()));
     }

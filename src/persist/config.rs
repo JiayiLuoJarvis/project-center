@@ -27,7 +27,7 @@ pub struct AppConfig {
     pub ide: Vec<Tool>,
     /// PIN 校验记录（PBKDF2 哈希，非 PIN 本身）；未设置时为 None 且不写盘。
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pin: Option<crate::secret::PinRecord>,
+    pub pin: Option<crate::persist::PinRecord>,
 }
 
 impl Default for AppConfig {
@@ -117,47 +117,66 @@ const DEFAULT_CONFIG: &str = r#"{
 pub struct Config;
 
 impl Config {
+    /// `PCS_CONFIG_PATH` 若非空则为配置文件完整路径（测试/CI 用）。
+    fn config_file() -> PathBuf {
+        if let Some(p) = std::env::var_os("PCS_CONFIG_PATH") {
+            let s = p.to_string_lossy();
+            if !s.trim().is_empty() {
+                return PathBuf::from(p);
+            }
+        }
+        Self::exe_dir().join("config.json")
+    }
+
     pub fn load() -> AppConfig {
-        Self::load_from_dir(&Self::exe_dir())
+        Self::load_from_path(&Self::config_file())
     }
 
     /// 从指定目录加载 `config.json`；缺失或损坏时自愈并返回默认配置。
+    #[cfg(test)]
     pub(crate) fn load_from_dir(dir: &Path) -> AppConfig {
-        let path = dir.join("config.json");
-        let Ok(text) = std::fs::read_to_string(&path) else {
+        Self::load_from_path(&dir.join("config.json"))
+    }
+
+    fn load_from_path(path: &Path) -> AppConfig {
+        let Ok(text) = std::fs::read_to_string(path) else {
             // 首次启动：生成默认配置供用户查看与修改。
-            if std::fs::write(&path, DEFAULT_CONFIG).is_err() {
+            if std::fs::write(path, DEFAULT_CONFIG).is_err() {
                 eprintln!("无法写入默认 config.json，本次使用内置默认配置。");
             }
             return AppConfig::defaults();
         };
         let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
-            Self::backup_and_reset(dir);
+            Self::backup_and_reset(path);
             return AppConfig::defaults();
         };
         if !value.is_object() {
-            Self::backup_and_reset(dir);
+            Self::backup_and_reset(path);
             return AppConfig::defaults();
         }
         parse_config(&value)
     }
 
     pub fn save(config: &AppConfig) -> bool {
-        Self::save_to_dir(&Self::exe_dir(), config)
+        Self::save_to_path(&Self::config_file(), config)
     }
 
-    /// 原子写：写 `config.json.tmp` -> 删除旧文件 -> rename。
+    /// 原子写：写旁路 `.tmp` -> 删除旧文件 -> rename。
+    #[cfg(test)]
     pub(crate) fn save_to_dir(dir: &Path, config: &AppConfig) -> bool {
-        let path = dir.join("config.json");
+        Self::save_to_path(&dir.join("config.json"), config)
+    }
+
+    fn save_to_path(path: &Path, config: &AppConfig) -> bool {
         let Ok(json) = serde_json::to_string_pretty(config) else {
             return false;
         };
-        let tmp = dir.join("config.json.tmp");
+        let tmp = path_with_suffix(path, ".tmp");
         if std::fs::write(&tmp, json).is_err() {
             return false;
         }
-        let _ = std::fs::remove_file(&path);
-        std::fs::rename(&tmp, &path).is_ok()
+        let _ = std::fs::remove_file(path);
+        std::fs::rename(&tmp, path).is_ok()
     }
 
     fn exe_dir() -> PathBuf {
@@ -168,15 +187,14 @@ impl Config {
     }
 
     /// 备份损坏的配置并重建默认；备份或写入失败仅警告，不影响使用。
-    fn backup_and_reset(dir: &Path) {
-        let path = dir.join("config.json");
-        let backup = dir.join("config.json.bak");
+    fn backup_and_reset(path: &Path) {
+        let backup = path_with_suffix(path, ".bak");
         let _ = std::fs::remove_file(&backup);
-        let backed_up = std::fs::rename(&path, &backup).is_ok();
+        let backed_up = std::fs::rename(path, &backup).is_ok();
         if !backed_up {
-            let _ = std::fs::remove_file(&path);
+            let _ = std::fs::remove_file(path);
         }
-        if std::fs::write(&path, DEFAULT_CONFIG).is_err() {
+        if std::fs::write(path, DEFAULT_CONFIG).is_err() {
             eprintln!("config.json 解析失败，且无法写入默认配置，本次使用内置默认。");
             return;
         }
@@ -186,6 +204,12 @@ impl Config {
             eprintln!("config.json 解析失败，已恢复默认配置（原文件备份失败）。");
         }
     }
+}
+
+fn path_with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut os = path.as_os_str().to_owned();
+    os.push(suffix);
+    PathBuf::from(os)
 }
 
 fn parse_config(value: &serde_json::Value) -> AppConfig {
@@ -198,9 +222,9 @@ fn parse_config(value: &serde_json::Value) -> AppConfig {
 }
 
 /// 解析顶层 `pin` 校验记录；缺失或损坏返回 None（仅警告，不影响工具配置）。
-fn parse_pin(value: &serde_json::Value) -> Option<crate::secret::PinRecord> {
+fn parse_pin(value: &serde_json::Value) -> Option<crate::persist::PinRecord> {
     let pin_value = value.get("pin")?;
-    match serde_json::from_value::<crate::secret::PinRecord>(pin_value.clone()) {
+    match serde_json::from_value::<crate::persist::PinRecord>(pin_value.clone()) {
         Ok(record) => Some(record),
         Err(_) => {
             eprintln!("config.json: `pin` 字段损坏，已忽略（需重新 pcs pin set）。");
@@ -334,6 +358,31 @@ mod tests {
 
     fn read_config(dir: &Path) -> String {
         std::fs::read_to_string(dir.join("config.json")).unwrap()
+    }
+
+    #[test]
+    fn pcs_config_path_overrides_exe_dir() {
+        let _lock = crate::persist::test_env::lock_appdata();
+        let dir = temp_dir();
+        // 故意用非 config.json 的 basename，确认读写都落在完整路径上。
+        let path = dir.join("custom-config.json");
+        std::fs::write(&path, r#"{"wsl":[],"powershell":[],"ide":[]}"#).unwrap();
+        let _guard = crate::persist::test_env::ConfigPathGuard::redirect(&path);
+
+        let config = Config::load();
+        assert!(config.wsl.is_empty());
+        assert!(config.powershell.is_empty());
+        assert!(config.ide.is_empty());
+
+        let mut updated = AppConfig::defaults();
+        add_tool(&mut updated, ConfigEnv::Ide, "CodeBuddy", "codebuddy").unwrap();
+        assert!(Config::save(&updated));
+        assert_eq!(Config::load(), updated);
+        assert!(path.exists());
+        assert!(!dir.join("config.json").exists());
+        assert!(!path_with_suffix(&path, ".tmp").exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -572,7 +621,7 @@ mod tests {
         assert!(value.get("pin").is_none(), "None 时不应写出 pin 键");
         // 设置 PIN：round trip 保留
         let mut config = AppConfig::defaults();
-        config.pin = Some(crate::secret::PinRecord {
+        config.pin = Some(crate::persist::PinRecord {
             salt: "AAAA".into(),
             iterations: 600_000,
             hash: "BBBB".into(),
