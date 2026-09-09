@@ -151,8 +151,8 @@ mod tests {
             askpass_prompt_from(args.iter().map(|s| (*s).to_string()))
         };
         assert_eq!(
-            from(&["abc@172.16.14.10's password: "]),
-            "abc@172.16.14.10's password: "
+            from(&["abc@192.0.2.10's password: "]),
+            "abc@192.0.2.10's password: "
         );
         assert_eq!(
             from(&["__askpass", "Enter passphrase for key:"]),
@@ -165,7 +165,7 @@ mod tests {
     #[test]
     fn askpass_kind_dispatch() {
         assert_eq!(
-            askpass_kind("abc@172.16.14.10's password: "),
+            askpass_kind("abc@192.0.2.10's password: "),
             AskpassKind::Password
         );
         assert_eq!(askpass_kind("请输入密码："), AskpassKind::Password);

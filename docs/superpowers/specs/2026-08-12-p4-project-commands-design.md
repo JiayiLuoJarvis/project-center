@@ -112,4 +112,4 @@ cargo clippy --all-targets -- -D warnings
 cargo build --release
 ```
 
-部署到 `E:\dev_tool\pcs\pcs.exe`（需先结束运行中的 pcs.exe 进程）。
+部署到用户选定的安装目录（需先结束运行中的 pcs.exe 进程）。

@@ -20,7 +20,7 @@
 
 | Rust 字段 | JSON 键 | 含义 |
 |---|---|---|
-| `ssh_target: String` | `sshTarget` | 如 `user@172.16.14.10` 或 `user@host:2222`（可选 `:端口` 后缀）；非空即 SSH 项目 |
+| `ssh_target: String` | `sshTarget` | 如 `user@192.0.2.10` 或 `user@host:2222`（可选 `:端口` 后缀）；非空即 SSH 项目 |
 | `ssh_key_file: String` | `sshKeyFile` | 密钥 sidecar 文件的**相对路径**（相对数据根，如 `keys/<uuid>.key`）；非空且文件存在即有密钥 |
 | `ssh_key_path: String` | `sshKeyPath` | 导入来源路径，仅显示用，明文无秘密 |
 | `ssh_password_enc: String` | `sshPasswordEnc` | 登录密码 DPAPI 密文（base64） |

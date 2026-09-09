@@ -385,7 +385,7 @@ pcs code 不存在项目   # 期望报错
 
 - [ ] **Step 3: 部署**
 
-结束运行中的 `pcs.exe` 进程（taskkill），复制 `target\release\pcs.exe` 到 `E:\dev_tool\pcs\pcs.exe`。
+结束运行中的 `pcs.exe` 进程（taskkill），复制 `target\release\pcs.exe` 到用户选定的安装目录。
 
 - [ ] **Step 4: 交互验证（真实终端）**
 

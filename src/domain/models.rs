@@ -536,7 +536,7 @@ mod tests {
     fn ssh_project_detection_and_windows_path() {
         let mut p = Project::new("srv", "", "");
         assert!(!p.is_ssh_project());
-        p.ssh_target = "abc@172.16.14.10".into();
+        p.ssh_target = "abc@192.0.2.10".into();
         p.path = "/opt/foo".into();
         assert!(p.is_ssh_project());
         // 远程 Linux 路径天然无 Windows 路径：PowerShell/IDE/Explorer 自动不可用。

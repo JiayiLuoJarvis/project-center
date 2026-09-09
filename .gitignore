@@ -1,3 +1,13 @@
 /target
 /backups/
-/.superpowers/  
+/.superpowers/
+
+# 防误拷入仓库的运行时/秘密文件
+/projects.json
+/config.json
+/keys/
+/keys_tmp/
+/.env
+.env.*
+*.pem
+*.key

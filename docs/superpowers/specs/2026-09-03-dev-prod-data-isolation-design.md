@@ -24,7 +24,7 @@ debug 与 release 二进制共用该路径。本地开发（增删改、清空�
 - 不改 `config.json` 位置（仍为 exe 同目录；debug/正式 exe 目录本就分离）。
 - 不引入 `PCS_DATA_DIR` 等环境变量覆盖。
 - 不自动恢复已被覆盖的生产 `projects.json`（备份恢复为运维步骤，另做）。
-- 不改变 release 部署流程（仍按需复制 `pcs.exe` 到 `E:\dev_tool\pcs\`）。
+- 不改变 release 部署流程（仍按需复制 `pcs.exe` 到用户选定的安装目录）。
 
 ## 2. 规则
 
@@ -96,7 +96,7 @@ fn home_dir_name() -> &'static str {
 
 - 生产 JSON schema、字段名（`wslPath`、`trash` 等）、原子写与备份轮转规则**不变**。
 - debug 与 release 是两套独立文件；不自动同步、不迁移。
-- `config.json` 仍在 exe 旁：`E:\dev_tool\pcs\config.json` vs `target\debug\config.json`。
+- `config.json` 仍在 exe 旁：安装目录下的 `config.json` vs `target\debug\config.json`。
 
 ## 5. 错误处理
 
@@ -107,7 +107,7 @@ fn home_dir_name() -> &'static str {
 | 行为 | 说明 |
 |---|---|
 | release 任意路径启动 | 读写生产 `project_center`（有意） |
-| debug exe 拷到 `E:\dev_tool\pcs\` | 不改生产 projects；但会读写该目录 `config.json`（config 跟 exe 目录，既有语义） |
+| debug exe 拷到 release 安装目录 | 不改生产 projects；但会读写该目录 `config.json`（config 跟 exe 目录，既有语义） |
 | `cargo test --release` 若误调 `Store::load()` | 会碰生产；现状测试只走临时路径，保持即可 |
 
 ## 7. 验证

@@ -563,7 +563,7 @@ fn add_ssh_project_via_form() {
     }
     // 字段 6：主机
     app.handle(key(KeyCode::Tab), &mut data, &mut config);
-    for c in "172.16.14.10".chars() {
+    for c in "192.0.2.10".chars() {
         app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
     }
     // 字段 7：端口预填 22，直接留用
@@ -580,7 +580,7 @@ fn add_ssh_project_via_form() {
     }
     let p = &data.groups[0].projects[1];
     assert!(p.is_ssh_project());
-    assert_eq!(p.ssh_target, "abc@172.16.14.10:22");
+    assert_eq!(p.ssh_target, "abc@192.0.2.10:22");
     assert_eq!(p.path, "/opt/x");
     assert!(p.wsl_path.is_empty());
 

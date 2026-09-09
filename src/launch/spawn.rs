@@ -535,8 +535,8 @@ mod tests {
     #[test]
     fn parse_ssh_target_basic_port_and_ipv6_guard() {
         assert_eq!(
-            parse_ssh_target("abc@172.16.14.10"),
-            ("abc@172.16.14.10".into(), None)
+            parse_ssh_target("abc@192.0.2.10"),
+            ("abc@192.0.2.10".into(), None)
         );
         assert_eq!(
             parse_ssh_target("abc@host:2222"),
@@ -629,10 +629,7 @@ mod tests {
 
     #[test]
     fn ssh_args_bare_and_with_path() {
-        assert_eq!(
-            ssh_args("abc@172.16.14.10", None, ""),
-            vec!["abc@172.16.14.10"]
-        );
+        assert_eq!(ssh_args("abc@192.0.2.10", None, ""), vec!["abc@192.0.2.10"]);
         assert_eq!(
             ssh_args("abc@h:2222", None, "/opt/foo"),
             vec![
