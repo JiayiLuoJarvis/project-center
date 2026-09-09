@@ -53,7 +53,8 @@ impl LaunchEnv {
 
 /// 在当前控制台内等待子进程结束；期间忽略 Ctrl+C / Ctrl+Break，
 /// 避免信号误杀本进程后由外层 shell 抢回控制台输入，导致被启动的工具收不到按键。
-fn wait_console_child(mut child: std::process::Child) -> std::io::Result<()> {
+/// 返回子进程退出码；被信号终止（`code()` 为 None）映射为 -1。
+fn wait_console_child(mut child: std::process::Child) -> std::io::Result<i32> {
     unsafe {
         SetConsoleCtrlHandler(None, 1);
     }
@@ -61,7 +62,7 @@ fn wait_console_child(mut child: std::process::Child) -> std::io::Result<()> {
     unsafe {
         SetConsoleCtrlHandler(None, 0);
     }
-    result.map(|_| ())
+    result.map(|status| status.code().unwrap_or(-1))
 }
 
 fn console_title(project: &Project, group_name: &str) -> String {
@@ -146,26 +147,32 @@ fn spawn_explorer(p: &Project) -> Result<std::process::Child, String> {
         .map_err(|e| format!("资源管理器启动失败: {e}"))
 }
 
-/// 解析 SSH 目标：`(user@host:port)` -> `(user@host, Option<port>)`。
-/// 仅当 host 部分不含 `:` 且末段为纯数字时视为端口；IPv6 目标 v1 不支持。
-fn parse_ssh_target(target: &str) -> (String, Option<String>) {
-    let target = target.trim();
-    match target.rfind(':') {
+/// 拆出主机与可选端口：`host:port` -> `(host, Some(port))`。
+/// 仅当 host 部分不含 `:` 且末段为纯数字时视为端口；IPv6 目标 v1 不支持
+/// （一律不拆，保证不拆坏目标串）。输入需已 trim。
+pub(crate) fn split_host_port(rest: &str) -> (&str, Option<&str>) {
+    match rest.rfind(':') {
         Some(pos) => {
-            let (host, port) = target.split_at(pos);
+            let (host, port) = rest.split_at(pos);
             let port = &port[1..];
             if !host.is_empty()
                 && !host.contains(':')
                 && !port.is_empty()
                 && port.bytes().all(|b| b.is_ascii_digit())
             {
-                (host.to_string(), Some(port.to_string()))
+                (host, Some(port))
             } else {
-                (target.to_string(), None)
+                (rest, None)
             }
         }
-        None => (target.to_string(), None),
+        None => (rest, None),
     }
+}
+
+/// 解析 SSH 目标：`(user@host:port)` -> `(user@host, Option<port>)`。
+fn parse_ssh_target(target: &str) -> (String, Option<String>) {
+    let (host, port) = split_host_port(target.trim());
+    (host.to_string(), port.map(str::to_string))
 }
 
 /// 构造 ssh 参数：`[-p port] [-i key] user@host [-t "cd '<path>' 2>/dev/null; exec $SHELL"]`。
@@ -229,6 +236,62 @@ fn has_saved_secrets(p: &Project) -> bool {
     !p.ssh_password_enc.trim().is_empty() || !p.ssh_key_pass_enc.trim().is_empty()
 }
 
+/// askpass 注入决策。存有可解密秘密但主机不在 known_hosts 时跳过注入：
+/// force 会把首连的 host key 确认也路由给 askpass（回空 = 拒绝）导致秒败；
+/// 首连转交互（确认 host key + 手动输一次密码）后，known_hosts 命中即恢复注入。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AskpassPlan {
+    /// 无保存秘密：不注入，全交互。
+    NoSecrets,
+    /// 有秘密但解密失败：不注入并提示。
+    DecryptFailed,
+    /// 主机已在 known_hosts：注入。
+    Inject,
+    /// 首次连接：不注入并提示手动确认。
+    FirstConnect,
+}
+
+fn askpass_plan(has_secrets: bool, decryptable: bool, known: bool) -> AskpassPlan {
+    if !has_secrets {
+        AskpassPlan::NoSecrets
+    } else if !decryptable {
+        AskpassPlan::DecryptFailed
+    } else if known {
+        AskpassPlan::Inject
+    } else {
+        AskpassPlan::FirstConnect
+    }
+}
+
+/// known_hosts 查找名形态，与 ssh 写入格式一致：
+/// 无端口或端口 22 → 裸主机名；否则 → `[host]:port`。
+fn known_hosts_lookup_name(host: &str, port: Option<&str>) -> String {
+    match port {
+        Some(p) if p != "22" => format!("[{host}]:{p}"),
+        _ => host.to_string(),
+    }
+}
+
+/// 用 `ssh-keygen -F`（原生支持 hashed 条目）判定主机是否已在 known_hosts。
+/// 退出码 0 或 stdout 含 "found" 均视为命中（双保险防版本差异）；
+/// ssh-keygen 缺失/调用失败按未知处理——最坏情形是手动输一次密码（安全降级）。
+fn host_known(host: &str, port: Option<&str>) -> bool {
+    host_known_with(None, &known_hosts_lookup_name(host, port))
+}
+
+/// `file` 供测试注入自定义 known_hosts；`None` 用默认 `~/.ssh/known_hosts`。
+fn host_known_with(file: Option<&std::path::Path>, lookup_name: &str) -> bool {
+    let mut cmd = Command::new("ssh-keygen");
+    cmd.arg("-F").arg(lookup_name);
+    if let Some(path) = file {
+        cmd.arg("-f").arg(path);
+    }
+    match cmd.output() {
+        Ok(out) => out.status.success() || String::from_utf8_lossy(&out.stdout).contains("found"),
+        Err(_) => false,
+    }
+}
+
 fn spawn_ssh(p: &Project, group_name: &str) -> Result<SpawnedDirect, String> {
     set_console_title(p, group_name);
 
@@ -263,29 +326,48 @@ fn spawn_ssh(p: &Project, group_name: &str) -> Result<SpawnedDirect, String> {
     let mut cmd = Command::new("ssh");
     cmd.args(ssh_args(&p.ssh_target, key_arg.as_deref(), &p.path));
 
-    // askpass 自动填充：仅当存有可解密的密码/口令时注入；
-    // env 只携带项目 id 与一次性 token，秘密由 __askpass 自行解密。
-    if !has_saved_secrets(p) {
-        // 无保存秘密：不注入，全部走正常交互（密码/口令/host key 确认）。
-    } else if !askpass_env_ok(p) {
-        eprintln!("提示：保存的密码/口令解密失败，本次回退交互输入。");
-    } else if let Ok(exe) = std::env::current_exe() {
-        match random_token_hex() {
-            Ok(token) => match write_askpass_token_file(&token) {
-                Ok(token_path) => {
-                    cmd.env("SSH_ASKPASS", &exe);
-                    cmd.env("SSH_ASKPASS_REQUIRE", "force");
-                    cmd.env("DISPLAY", ":0");
-                    cmd.env("PCS_ASKPASS_ID", &p.id);
-                    cmd.env("PCS_ASKPASS_TOKEN", &token);
-                    cmd.env("PCS_ASKPASS_TOKEN_FILE", &token_path);
-                    temp_token = Some(token_path);
+    // askpass 自动填充：按决策注入；env 只携带项目 id 与一次性 token，
+    // 秘密由 __askpass 自行解密。主机未知（首连）时跳过注入走交互。
+    let (userhost, port) = parse_ssh_target(&p.ssh_target);
+    let host = userhost
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(&userhost);
+    let plan = askpass_plan(
+        has_saved_secrets(p),
+        askpass_env_ok(p),
+        host_known(host, port.as_deref()),
+    );
+    match plan {
+        AskpassPlan::NoSecrets => {}
+        AskpassPlan::DecryptFailed => {
+            eprintln!("提示：保存的密码/口令解密失败，本次回退交互输入。");
+        }
+        AskpassPlan::FirstConnect => {
+            eprintln!(
+                "提示：首次连接 {host}：请确认 host key 并手动输入密码，连接成功后自动填充。"
+            );
+        }
+        AskpassPlan::Inject => {
+            if let Ok(exe) = std::env::current_exe() {
+                match random_token_hex() {
+                    Ok(token) => match write_askpass_token_file(&token) {
+                        Ok(token_path) => {
+                            cmd.env("SSH_ASKPASS", &exe);
+                            cmd.env("SSH_ASKPASS_REQUIRE", "force");
+                            cmd.env("DISPLAY", ":0");
+                            cmd.env("PCS_ASKPASS_ID", &p.id);
+                            cmd.env("PCS_ASKPASS_TOKEN", &token);
+                            cmd.env("PCS_ASKPASS_TOKEN_FILE", &token_path);
+                            temp_token = Some(token_path);
+                        }
+                        Err(e) => {
+                            eprintln!("警告：askpass 校验文件写入失败（{e}），本次回退交互输入。")
+                        }
+                    },
+                    Err(e) => eprintln!("警告：随机 token 生成失败（{e}），本次回退交互输入。"),
                 }
-                Err(e) => {
-                    eprintln!("警告：askpass 校验文件写入失败（{e}），本次回退交互输入。")
-                }
-            },
-            Err(e) => eprintln!("警告：随机 token 生成失败（{e}），本次回退交互输入。"),
+            }
         }
     }
 
@@ -380,11 +462,12 @@ pub fn spawn_direct(
 }
 
 /// 等待子进程退出（阻塞、抑制 Ctrl+C），随后清理 SSH 临时密钥与
-/// askpass token 校验文件（成功/失败/中断都走）。
-pub fn wait_spawned(spawned: SpawnedDirect) -> Result<(), String> {
+/// askpass token 校验文件（成功/失败/中断都走）。返回子进程退出码
+/// （无子进程为 0；被信号终止为 -1）。
+pub fn wait_spawned(spawned: SpawnedDirect) -> Result<i32, String> {
     let result = match spawned.child {
         Some(child) => wait_console_child(child).map_err(|e| format!("等待子进程结束失败: {e}")),
-        None => Ok(()),
+        None => Ok(0),
     };
     if let Some(path) = spawned.temp_key_path {
         secret::shred_and_remove(&path);
@@ -471,6 +554,78 @@ mod tests {
             parse_ssh_target("abc@[::1]:22"),
             ("abc@[::1]:22".into(), None)
         );
+    }
+
+    #[test]
+    fn split_host_port_direct_cases() {
+        assert_eq!(split_host_port("h"), ("h", None));
+        assert_eq!(split_host_port("h:2222"), ("h", Some("2222")));
+        assert_eq!(split_host_port("h:22x"), ("h:22x", None));
+        assert_eq!(split_host_port(":2222"), (":2222", None));
+        // IPv6 一律不拆
+        assert_eq!(split_host_port("::1"), ("::1", None));
+    }
+
+    #[test]
+    fn known_hosts_lookup_name_forms() {
+        assert_eq!(known_hosts_lookup_name("h", None), "h");
+        assert_eq!(known_hosts_lookup_name("h", Some("22")), "h");
+        assert_eq!(known_hosts_lookup_name("h", Some("2222")), "[h]:2222");
+    }
+
+    #[test]
+    fn askpass_plan_covers_all_branches() {
+        assert_eq!(askpass_plan(false, false, false), AskpassPlan::NoSecrets);
+        assert_eq!(askpass_plan(true, false, true), AskpassPlan::DecryptFailed);
+        assert_eq!(askpass_plan(true, true, true), AskpassPlan::Inject);
+        assert_eq!(askpass_plan(true, true, false), AskpassPlan::FirstConnect);
+    }
+
+    #[test]
+    fn host_known_with_matches_real_keygen() {
+        // 依赖系统 ssh-keygen（与 ssh 同装同失）：缺失时跳过断言直接通过。
+        if std::process::Command::new("ssh-keygen").output().is_err() {
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("pcs_kh_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("known_hosts");
+        std::fs::write(
+            &file,
+            "h.local ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFakeFakeFakeFakeFakeFakeFakeFakeFak\n",
+        )
+        .unwrap();
+        assert!(host_known_with(Some(&file), "h.local"));
+        assert!(!host_known_with(Some(&file), "other.local"));
+        assert!(!host_known_with(Some(&dir.join("missing")), "h.local"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn wait_spawned_returns_exit_code() {
+        let child = std::process::Command::new("cmd")
+            .args(["/c", "exit 7"])
+            .spawn()
+            .unwrap();
+        let code = wait_spawned(SpawnedDirect {
+            child: Some(child),
+            temp_key_path: None,
+            temp_token_path: None,
+        })
+        .unwrap();
+        assert_eq!(code, 7);
+
+        let child = std::process::Command::new("cmd")
+            .args(["/c", "exit 0"])
+            .spawn()
+            .unwrap();
+        let code = wait_spawned(SpawnedDirect {
+            child: Some(child),
+            temp_key_path: None,
+            temp_token_path: None,
+        })
+        .unwrap();
+        assert_eq!(code, 0);
     }
 
     #[test]

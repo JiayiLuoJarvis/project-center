@@ -274,8 +274,15 @@ enum ConfigCommand {
 }
 
 fn main() -> Result<()> {
+    // OpenSSH 把 SSH_ASKPASS 当独立程序调用：`pcs.exe <prompt>`，不会带
+    // `__askpass` 子命令。父进程注入 PCS_ASKPASS_TOKEN 时在 clap 之前拦截，
+    // 否则 clap 会把 prompt（含空格/撇号）当成未识别子命令并写 stderr，
+    // 导致认证失败且污染控制台。
+    if std::env::var_os("PCS_ASKPASS_TOKEN").is_some() {
+        return cmd_askpass(&askpass_prompt_from_args());
+    }
     let cli = Cli::parse();
-    // `__askpass` 全程只读：提前于 Config::load（其缺失时会写默认配置）。
+    // 手工/测试入口：`pcs __askpass <prompt>`（无 token 时 cmd_askpass 输出空）。
     if let Some(Command::Askpass { prompt }) = &cli.command {
         return cmd_askpass(prompt);
     }
@@ -305,6 +312,22 @@ fn main() -> Result<()> {
         Some(Command::Secret(command)) => cmd_secret(command),
         // 运行时不可达（上方已提前返回），仅为 match 穷尽性保留。
         Some(Command::Askpass { prompt }) => cmd_askpass(&prompt),
+    }
+}
+
+/// 从 argv 提取 askpass prompt。兼容两种调用：
+/// - OpenSSH：`pcs.exe <prompt>`（prompt 可能含空格，已由系统按单参传入）
+/// - 手工：`pcs.exe __askpass <prompt>`
+fn askpass_prompt_from_args() -> String {
+    askpass_prompt_from(std::env::args().skip(1))
+}
+
+/// 纯解析：供单元测试直接喂入参数列表，避免与生产逻辑分叉。
+fn askpass_prompt_from(mut args: impl Iterator<Item = String>) -> String {
+    match args.next() {
+        Some(first) if first == "__askpass" => args.next().unwrap_or_default(),
+        Some(first) => first,
+        None => String::new(),
     }
 }
 
@@ -1167,6 +1190,24 @@ fn save(data: &ProjectData) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn askpass_prompt_from_args_shapes() {
+        // 直接测生产解析：OpenSSH 单参 / 手工 __askpass / 空参。
+        let from = |args: &[&str]| -> String {
+            askpass_prompt_from(args.iter().map(|s| (*s).to_string()))
+        };
+        assert_eq!(
+            from(&["abc@172.16.14.10's password: "]),
+            "abc@172.16.14.10's password: "
+        );
+        assert_eq!(
+            from(&["__askpass", "Enter passphrase for key:"]),
+            "Enter passphrase for key:"
+        );
+        assert_eq!(from(&["__askpass"]), "");
+        assert_eq!(from(&[]), "");
+    }
 
     #[test]
     fn askpass_kind_dispatch() {

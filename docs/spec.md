@@ -102,11 +102,13 @@ WSL、PowerShell 启动为「当前控制台 + 等待子进程退出（抑制 Ct
 
 - 启动参数：`ssh [-p 端口] [-i 临时密钥] user@host [-t "cd '<远程路径>' 2>/dev/null; exec $SHELL"]`；远程路径缺失/错误时静默落在默认 shell，不断连。
 - 秘密存储：密码/私钥口令以 DPAPI 密文存 projects.json；私钥以 DPAPI 密文存数据根 `keys\<项目id>.key`（JSON 仅存相对路径）。
-- 自动填充：仅当项目存有可解密的密码/口令时注入 `SSH_ASKPASS=<pcs 自身>`、`SSH_ASKPASS_REQUIRE=force` 与一次性 token（token 校验文件落于数据根 `keys_tmp\`，ssh 退出即清理；1 小时内的活跃会话文件不受启动维护清理影响），由隐藏子命令 `pcs __askpass` 按 prompt 回答密码/口令（token 缺失/不匹配输出空；不代答 host key 确认）；无保存秘密或解密失败时回退交互输入。
+- 自动填充：仅当项目存有可解密的密码/口令时注入 `SSH_ASKPASS=<pcs 自身>`、`SSH_ASKPASS_REQUIRE=force` 与一次性 token（token 校验文件落于数据根 `keys_tmp\`，ssh 退出即清理；1 小时内的活跃会话文件不受启动维护清理影响）。OpenSSH 回调为 `pcs.exe <prompt>`（不带子命令）；pcs 在 clap 解析前检测 `PCS_ASKPASS_TOKEN` 后按 prompt 回答密码/口令（token 缺失/不匹配输出空；不代答 host key 确认）。隐藏子命令 `pcs __askpass <prompt>` 仍保留供手工/测试。无保存秘密或解密失败时回退交互输入。
+- 首连保护：主机不在 known_hosts（用 `ssh-keygen -F` 判定，原生支持 hashed 条目；退出码 0 或输出含 found 为命中，ssh-keygen 缺失/调用失败按未知处理）时跳过注入并提示——force 会把首连 host key 确认也路由给 askpass（回空 = 拒绝）导致秒败；首连转交互（确认 host key + 手动输一次密码），连接成功后自动恢复填充。查找名与 ssh 写入格式一致：无端口/端口 22 → 裸主机名，否则 `[host]:port`。
+- 失败可读：TUI 启动 ssh 后等待子进程；非零退出（含被信号终止）时在控制台暂停显示「SSH 连接失败（退出码 N / 异常终止）。按 Enter 返回…」，避免报错一闪而过；WSL/PowerShell/IDE 不受影响，spawn 失败仍走 TUI flash。
 - 查看保存的秘密：`pcs secret show <项目>` 或 TUI 中 `v`，需先 `pcs pin set` 设置 PIN（PBKDF2 校验哈希存 config.json）；`pcs pin change` 修改、`pcs pin reset --force` 重置（清空 PIN 与全部已存密码、口令、密钥文件）。
 - CLI：`pcs ssh <项目>` 直连；`pcs add/edit` 支持 `--ssh`、`--ssh-path`、`--ssh-key`（导入加密）与 `--password-stdin`、`--key-pass-stdin`（控制台输入不回显，提示语走 stderr，重定向喂入不受影响）；`pcs open -s` 等价于 SSH 启动。
 - 删除与回收站：软删保留密钥文件（可恢复）；真删（force / 回收站单项删除 / 过期清理 / 清空回收站）删除密钥文件，删除失败记入 `pendingKeyDeletes` 每次启动重试。孤儿密钥文件按 JSON 引用清理，且仅在数据非退化（非损坏兜底/备份恢复）时执行，避免误删。
-- TUI：新增项目对话框可直接填写 SSH 目标、远程路径、导入密钥、密码与私钥口令（密码/口令掩码显示），一次提交完成秘密保存。
+- TUI：新增/编辑项目对话框将 SSH 目标拆分为「登录用户」「主机」「端口」三字段分开填写（端口默认 22，留空用当前用户登录），保存时拼为 sshTarget；另可填写远程路径、导入密钥、密码与私钥口令（密码/口令掩码显示），一次提交完成秘密保存。
 
 ## 8. 验证
 

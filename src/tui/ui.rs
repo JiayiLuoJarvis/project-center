@@ -580,7 +580,11 @@ fn render_form(
                 }
                 lines.push(Line::from(spans));
             }
-            FormField::Password { label, value } => {
+            FormField::Password {
+                label,
+                value,
+                empty_hint,
+            } => {
                 let label_style = if focused {
                     theme::accent().add_modifier(Modifier::BOLD)
                 } else {
@@ -589,7 +593,7 @@ fn render_form(
                 lines.push(Line::from(Span::styled(label.clone(), label_style)));
                 let len = value.chars().count();
                 let masked = if len == 0 {
-                    "（未设置）".to_string()
+                    empty_hint.clone()
                 } else {
                     format!(
                         "{}{}",
@@ -644,12 +648,47 @@ fn render_form(
         theme::muted(),
     )));
 
+    // 表单弹窗只有 60% 高且无滚动容器：字段多了（SSH 新增表单 12 字段）
+    // 在矮终端会裁掉尾部；按焦点滚动，保证当前字段首行始终可见。
+    let scroll = form_scroll_offset(fields, focus, inner.height as usize, error.is_some());
+
     frame.render_widget(
         Paragraph::new(lines)
             .wrap(Wrap { trim: false })
+            .scroll((scroll, 0))
             .style(theme::base()),
         inner,
     );
+}
+
+/// 表单滚动偏移：保证焦点字段首行始终可见（绝不把焦点滚出屏）。
+/// Text/Password 占 3 行（标签/值/空行），Button 占 2 行；尾部为
+/// 错误行（有错 2 行）+ 底部提示行（1 行）。
+pub(crate) fn form_scroll_offset(
+    fields: &[FormField],
+    focus: usize,
+    visible_height: usize,
+    has_error: bool,
+) -> u16 {
+    let mut focused_start = 0usize;
+    let mut focused_lines = 3usize;
+    let mut line = 0usize;
+    for (i, field) in fields.iter().enumerate() {
+        let height = match field {
+            FormField::Button { .. } => 2,
+            _ => 3,
+        };
+        if i == focus {
+            focused_start = line;
+            focused_lines = height;
+        }
+        line += height;
+    }
+    let total = line + if has_error { 2 } else { 0 } + 1;
+    let mut scroll = (focused_start + focused_lines).saturating_sub(visible_height);
+    scroll = scroll.min(focused_start);
+    scroll = scroll.min(total.saturating_sub(visible_height));
+    scroll.min(u16::MAX as usize) as u16
 }
 
 fn render_input(frame: &mut Frame, area: Rect, prompt: &str, buffer: &str, filter: bool) {
@@ -663,4 +702,40 @@ fn render_input(frame: &mut Frame, area: Rect, prompt: &str, buffer: &str, filte
         Span::styled(format!("{buffer}█"), style),
     ]);
     frame.render_widget(Paragraph::new(line).style(theme::base()), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text_field() -> FormField {
+        FormField::Text {
+            label: String::new(),
+            value: String::new(),
+        }
+    }
+
+    fn button_field() -> FormField {
+        FormField::Button {
+            label: String::new(),
+        }
+    }
+
+    #[test]
+    fn form_scroll_keeps_focus_visible() {
+        // 12 文本字段：36 行 + 提示行 = 37 行内容
+        let fields: Vec<FormField> = (0..12).map(|_| text_field()).collect();
+        // 焦点在头部：不滚
+        assert_eq!(form_scroll_offset(&fields, 0, 16, false), 0);
+        // 焦点在尾部（首行 33）：滚到刚好容下该字段，且首行仍可见
+        assert_eq!(form_scroll_offset(&fields, 11, 16, false), 20);
+        // 可见高度足够：不滚
+        assert_eq!(form_scroll_offset(&fields, 11, 40, false), 0);
+        // 有错误行时尾部多 2 行
+        assert_eq!(form_scroll_offset(&fields, 11, 16, true), 20);
+        // 按钮占 2 行：焦点在按钮上按 2 行算
+        let mixed = vec![text_field(), button_field(), text_field()];
+        assert_eq!(form_scroll_offset(&mixed, 1, 4, false), 1);
+        assert_eq!(form_scroll_offset(&mixed, 2, 4, false), 4);
+    }
 }

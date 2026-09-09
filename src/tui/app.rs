@@ -112,9 +112,11 @@ pub enum FormField {
         value: String,
     },
     /// 密码输入：value 存明文，渲染为星号掩码。
+    /// `empty_hint`：value 为空时显示的占位（如「未设置」/「已保存，留空不改」）。
     Password {
         label: String,
         value: String,
+        empty_hint: String,
     },
     Button {
         label: String,
@@ -489,9 +491,14 @@ impl App {
     }
 
     fn password_field(label: &str) -> FormField {
+        Self::password_field_with_hint(label, "（未设置）")
+    }
+
+    fn password_field_with_hint(label: &str, empty_hint: &str) -> FormField {
         FormField::Password {
             label: label.into(),
             value: String::new(),
+            empty_hint: empty_hint.into(),
         }
     }
 
@@ -511,6 +518,8 @@ impl App {
         };
     }
 
+    /// 基础表单字段索引：0 项目名 / 1 别名 / 2 Windows 路径 / 3 浏览按钮 /
+    /// 4 WSL 路径 / 5 登录用户 / 6 主机 / 7 端口 / 8 远程 Linux 路径。
     fn project_form_fields(name: &str, alias: &str, path: &str, wsl_path: &str) -> Vec<FormField> {
         vec![
             Self::text_field("项目名", name),
@@ -518,13 +527,15 @@ impl App {
             Self::text_field("Windows 路径", path),
             Self::button_field("浏览文件夹…"),
             Self::text_field("WSL 路径", wsl_path),
-            Self::text_field("SSH 目标（留空为普通项目）", ""),
+            Self::text_field("登录用户（SSH 项目，可选，留空用当前用户）", ""),
+            Self::text_field("主机（SSH 项目，仅域名/IPv4，留空为普通项目）", ""),
+            Self::text_field("端口（SSH 项目，默认 22）", "22"),
             Self::text_field("远程 Linux 路径", ""),
         ]
     }
 
-    /// 新增表单：基础字段 + SSH 秘密字段（7 密钥来源 / 8 密码 / 9 口令，
-    /// 仅 SSH 目标非空时生效），新增即可直接保存秘密，无需二次编辑。
+    /// 新增表单：基础字段 + SSH 秘密字段（9 密钥来源 / 10 密码 / 11 口令，
+    /// 仅主机非空时生效），新增即可直接保存秘密，无需二次编辑。
     fn project_add_fields() -> Vec<FormField> {
         let mut fields = Self::project_form_fields("", "", "", "");
         fields.push(Self::text_field("私钥来源路径（SSH 项目，可选）", ""));
@@ -534,18 +545,37 @@ impl App {
     }
 
     /// 编辑表单：SSH 项目用 SSH 专用字段；普通项目附 SSH 转换字段。
+    /// SSH 表单字段索引：0 登录用户 / 1 主机 / 2 端口 / 3 远程路径 /
+    /// 4 密钥来源 / 5 密码 / 6 口令。
     fn project_edit_fields(p: &Project) -> Vec<FormField> {
         if p.is_ssh_project() {
+            let (user, host, port) = Self::split_ssh_target(&p.ssh_target);
+            // 密码框恒为空值（留空不改语义）：label 简短，空值占位用 empty_hint
+            // 标明已存/未存，避免值行被画成「未设置」与「已保存」矛盾。
+            let (pw_label, pw_hint) = if p.ssh_password_enc.trim().is_empty() {
+                ("登录密码", "（未设置）")
+            } else {
+                ("登录密码", "（已保存，留空不改）")
+            };
+            let (kp_label, kp_hint) = if p.ssh_key_pass_enc.trim().is_empty() {
+                ("私钥口令", "（未设置）")
+            } else {
+                ("私钥口令", "（已保存，留空不改）")
+            };
             return vec![
-                Self::text_field("SSH 目标", &p.ssh_target),
+                Self::text_field("登录用户（留空用当前用户）", &user),
+                Self::text_field("主机（域名/IPv4）", &host),
+                Self::text_field("端口（默认 22）", &port),
                 Self::text_field("远程 Linux 路径", &p.path),
                 Self::text_field("私钥来源路径（填路径导入替换，留空不变）", &p.ssh_key_path),
-                Self::password_field("登录密码（留空不改）"),
-                Self::password_field("私钥口令（留空不改）"),
+                Self::password_field_with_hint(pw_label, pw_hint),
+                Self::password_field_with_hint(kp_label, kp_hint),
             ];
         }
         let mut fields = Self::project_form_fields(&p.name, &p.alias, &p.path, &p.wsl_path);
-        fields[5] = Self::text_field("SSH 目标（填入即转为 SSH 项目）", "");
+        fields[5] = Self::text_field("登录用户（填主机后生效，留空用当前用户）", "");
+        fields[6] = Self::text_field("主机（填入即转为 SSH 项目）", "");
+        fields[7] = Self::text_field("端口（填主机后生效，默认 22）", "22");
         fields
     }
 
@@ -556,6 +586,50 @@ impl App {
             }
             _ => String::new(),
         }
+    }
+
+    /// 拼接 SSH 目标：`[user@]host[:port]`。user/host 禁止含 `@`（防拼出
+    /// `a@b@c` 这类坏目标）；port 非空时必须为纯数字，留空即 ssh 默认 22。
+    fn compose_ssh_target(user: &str, host: &str, port: &str) -> Result<String, String> {
+        let user = user.trim();
+        let host = host.trim();
+        let port = port.trim();
+        if user.contains('@') {
+            return Err("登录用户不要包含 @".into());
+        }
+        if host.contains('@') {
+            return Err("主机不要包含 @，用户名请填在“登录用户”字段".into());
+        }
+        if !port.is_empty() && !port.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("端口必须是纯数字".into());
+        }
+        let mut target = String::new();
+        if !user.is_empty() {
+            target.push_str(user);
+            target.push('@');
+        }
+        target.push_str(host);
+        if !port.is_empty() {
+            target.push(':');
+            target.push_str(port);
+        }
+        Ok(target)
+    }
+
+    /// 反拆已存 SSH 目标为（用户， 主机， 端口），供编辑表单预填；
+    /// 缺失部分为空串（与 `compose_ssh_target` 互为不动点）。
+    fn split_ssh_target(target: &str) -> (String, String, String) {
+        let target = target.trim();
+        let (user, rest) = match target.split_once('@') {
+            Some((u, r)) => (u, r),
+            None => ("", target),
+        };
+        let (host, port) = crate::launcher::split_host_port(rest);
+        (
+            user.to_string(),
+            host.to_string(),
+            port.unwrap_or_default().to_string(),
+        )
     }
 
     fn set_form_error(&mut self, error: impl Into<String>) {
@@ -1985,23 +2059,30 @@ impl App {
             FormKind::AddProject { group } => {
                 let name = Self::field_value(fields, 0);
                 let alias = Self::field_value(fields, 1);
-                let ssh_target = Self::field_value(fields, 5);
-                if !ssh_target.trim().is_empty() {
-                    let remote = Self::field_value(fields, 6);
-                    let key_source = Self::field_value(fields, 7);
-                    let password = Self::field_value(fields, 8);
-                    let key_pass = Self::field_value(fields, 9);
-                    actions::add_project_ssh(
-                        data,
-                        &group,
-                        &name,
-                        &alias,
-                        &ssh_target,
-                        &remote,
-                        &key_source,
-                        &password,
-                        &key_pass,
-                    )
+                // 基础表单索引：5 用户 / 6 主机 / 7 端口 / 8 远程路径 /
+                // 9 密钥来源 / 10 密码 / 11 口令
+                let ssh_host = Self::field_value(fields, 6);
+                if !ssh_host.trim().is_empty() {
+                    let ssh_user = Self::field_value(fields, 5);
+                    let ssh_port = Self::field_value(fields, 7);
+                    let remote = Self::field_value(fields, 8);
+                    let key_source = Self::field_value(fields, 9);
+                    let password = Self::field_value(fields, 10);
+                    let key_pass = Self::field_value(fields, 11);
+                    match Self::compose_ssh_target(&ssh_user, &ssh_host, &ssh_port) {
+                        Ok(ssh_target) => actions::add_project_ssh(
+                            data,
+                            &group,
+                            &name,
+                            &alias,
+                            &ssh_target,
+                            &remote,
+                            &key_source,
+                            &password,
+                            &key_pass,
+                        ),
+                        Err(e) => Err(e),
+                    }
                 } else {
                     let path = Self::field_value(fields, 2);
                     let wsl = Self::field_value(fields, 4);
@@ -2017,22 +2098,27 @@ impl App {
                     .map(|p| p.is_ssh_project())
                     .unwrap_or(false);
                 if is_ssh {
-                    // SSH 编辑表单：0 目标 1 远程路径 2 密钥来源 3 密码 4 口令
-                    let target = Self::field_value(fields, 0);
-                    let remote = Self::field_value(fields, 1);
-                    let key_source = Self::field_value(fields, 2);
-                    let password = Self::field_value(fields, 3);
-                    let key_pass = Self::field_value(fields, 4);
-                    actions::edit_project_ssh(
-                        data,
-                        &group,
-                        &project_id,
-                        &target,
-                        &remote,
-                        &key_source,
-                        &password,
-                        &key_pass,
-                    )
+                    // SSH 编辑表单：0 用户 1 主机 2 端口 3 远程路径 4 密钥来源 5 密码 6 口令
+                    let ssh_user = Self::field_value(fields, 0);
+                    let ssh_host = Self::field_value(fields, 1);
+                    let ssh_port = Self::field_value(fields, 2);
+                    let remote = Self::field_value(fields, 3);
+                    let key_source = Self::field_value(fields, 4);
+                    let password = Self::field_value(fields, 5);
+                    let key_pass = Self::field_value(fields, 6);
+                    match Self::compose_ssh_target(&ssh_user, &ssh_host, &ssh_port) {
+                        Ok(target) => actions::edit_project_ssh(
+                            data,
+                            &group,
+                            &project_id,
+                            &target,
+                            &remote,
+                            &key_source,
+                            &password,
+                            &key_pass,
+                        ),
+                        Err(e) => Err(e),
+                    }
                 } else {
                     let name = Self::field_value(fields, 0);
                     let alias = Self::field_value(fields, 1);
@@ -2040,11 +2126,22 @@ impl App {
                     let wsl = Self::field_value(fields, 4);
                     let base =
                         actions::edit_project(data, &group, &old_name, &name, &alias, &path, &wsl);
-                    // 普通项目表单填了 SSH 目标即转换为 SSH 项目
-                    let ssh_target = Self::field_value(fields, 5);
-                    if base.is_ok() && !ssh_target.trim().is_empty() {
-                        let remote = Self::field_value(fields, 6);
-                        actions::set_ssh_target(data, &group, &project_id, &ssh_target, &remote)
+                    // 普通项目表单填了主机即转换为 SSH 项目
+                    let ssh_host = Self::field_value(fields, 6);
+                    if base.is_ok() && !ssh_host.trim().is_empty() {
+                        let ssh_user = Self::field_value(fields, 5);
+                        let ssh_port = Self::field_value(fields, 7);
+                        let remote = Self::field_value(fields, 8);
+                        match Self::compose_ssh_target(&ssh_user, &ssh_host, &ssh_port) {
+                            Ok(ssh_target) => actions::set_ssh_target(
+                                data,
+                                &group,
+                                &project_id,
+                                &ssh_target,
+                                &remote,
+                            ),
+                            Err(e) => Err(e),
+                        }
                     } else {
                         base
                     }
@@ -2879,13 +2976,21 @@ mod tests {
         for c in "srv".chars() {
             app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
         }
-        // Tab 到字段 5（SSH 目标）
+        // Tab 到字段 5（登录用户）
         for _ in 0..5 {
             app.handle(key(KeyCode::Tab), &mut data, &mut config);
         }
-        for c in "abc@172.16.14.10".chars() {
+        for c in "abc".chars() {
             app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
         }
+        // 字段 6：主机
+        app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        for c in "172.16.14.10".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        // 字段 7：端口预填 22，直接留用
+        app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        // 字段 8：远程路径
         app.handle(key(KeyCode::Tab), &mut data, &mut config);
         for c in "/opt/x".chars() {
             app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
@@ -2897,7 +3002,7 @@ mod tests {
         }
         let p = &data.groups[0].projects[1];
         assert!(p.is_ssh_project());
-        assert_eq!(p.ssh_target, "abc@172.16.14.10");
+        assert_eq!(p.ssh_target, "abc@172.16.14.10:22");
         assert_eq!(p.path, "/opt/x");
         assert!(p.wsl_path.is_empty());
 
@@ -2928,26 +3033,31 @@ mod tests {
         for c in "srv".chars() {
             app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
         }
-        // Tab 到字段 5（SSH 目标）
+        // Tab 到字段 5（登录用户）
         for _ in 0..5 {
             app.handle(key(KeyCode::Tab), &mut data, &mut config);
         }
-        for c in "abc@h".chars() {
+        for c in "abc".chars() {
             app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
         }
-        // 字段 7：私钥来源路径
-        for _ in 0..2 {
+        // 字段 6：主机
+        app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        for c in "h".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        // 字段 7 端口预填 22 留用，字段 8 远程路径留空：Tab 到字段 9（私钥来源路径）
+        for _ in 0..3 {
             app.handle(key(KeyCode::Tab), &mut data, &mut config);
         }
         for c in key_source.to_string_lossy().chars() {
             app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
         }
-        // 字段 8：登录密码
+        // 字段 10：登录密码
         app.handle(key(KeyCode::Tab), &mut data, &mut config);
         for c in "pw123".chars() {
             app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
         }
-        // 字段 9：私钥口令留空，直接提交
+        // 字段 11：私钥口令留空，直接提交
         app.handle(key(KeyCode::Enter), &mut data, &mut config);
         match &app.mode {
             Mode::Browse => {}
@@ -2955,6 +3065,7 @@ mod tests {
         }
         let p = &data.groups[0].projects[1];
         assert!(p.is_ssh_project());
+        assert_eq!(p.ssh_target, "abc@h:22");
         assert!(!p.ssh_password_enc.is_empty(), "密码应已加密保存");
         assert_eq!(
             crate::secret::unprotect(&p.ssh_password_enc).unwrap(),
@@ -2989,12 +3100,58 @@ mod tests {
         app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
         match &app.mode {
             Mode::Form { fields, .. } => {
-                assert_eq!(fields.len(), 5, "SSH 编辑表单 5 字段");
-                assert_eq!(App::field_value(fields, 0), "abc@h");
-                assert_eq!(App::field_value(fields, 1), "/opt/x");
-                assert!(matches!(fields[3], FormField::Password { .. }));
-                assert!(matches!(fields[4], FormField::Password { .. }));
-                assert!(App::field_value(fields, 3).is_empty(), "密码初始为空");
+                assert_eq!(fields.len(), 7, "SSH 编辑表单 7 字段");
+                assert_eq!(App::field_value(fields, 0), "abc");
+                assert_eq!(App::field_value(fields, 1), "h");
+                assert_eq!(App::field_value(fields, 2), "");
+                assert_eq!(App::field_value(fields, 3), "/opt/x");
+                assert!(App::field_value(fields, 5).is_empty(), "密码初始为空");
+                // empty_hint 标明已存/未存；值行不再硬编码「未设置」。
+                let FormField::Password {
+                    label, empty_hint, ..
+                } = &fields[5]
+                else {
+                    panic!("字段 5 应为 Password，实际 {:?}", fields.get(5));
+                };
+                assert_eq!(label, "登录密码");
+                assert!(empty_hint.contains("已保存"), "实际 {empty_hint}");
+                let FormField::Password {
+                    label, empty_hint, ..
+                } = &fields[6]
+                else {
+                    panic!("字段 6 应为 Password，实际 {:?}", fields.get(6));
+                };
+                assert_eq!(label, "私钥口令");
+                assert!(empty_hint.contains("未设置"), "实际 {empty_hint}");
+            }
+            other => panic!("expected SSH form, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn edit_ssh_form_labels_unsaved_when_no_secrets() {
+        // 无任何秘密的 SSH 项目：密码/口令 empty_hint 均标「未设置」。
+        let mut data = sample();
+        {
+            let p = &mut data.groups[0].projects[0];
+            p.ssh_target = "abc@h".into();
+        }
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.left_sel = 0;
+        app.sync_right_pane(&data);
+        app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
+        match &app.mode {
+            Mode::Form { fields, .. } => {
+                let FormField::Password { empty_hint, .. } = &fields[5] else {
+                    panic!("字段 5 应为 Password，实际 {:?}", fields.get(5));
+                };
+                assert!(empty_hint.contains("未设置"), "实际 {empty_hint}");
+                let FormField::Password { empty_hint, .. } = &fields[6] else {
+                    panic!("字段 6 应为 Password，实际 {:?}", fields.get(6));
+                };
+                assert!(empty_hint.contains("未设置"), "实际 {empty_hint}");
             }
             other => panic!("expected SSH form, got {other:?}"),
         }
@@ -3011,10 +3168,256 @@ mod tests {
         app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
         match &app.mode {
             Mode::Form { fields, .. } => {
-                assert_eq!(fields.len(), 7, "普通编辑表单含 SSH 转换字段");
+                assert_eq!(fields.len(), 9, "普通编辑表单含 SSH 转换字段");
                 assert_eq!(App::field_value(fields, 5), "");
+                assert_eq!(App::field_value(fields, 6), "");
+                assert_eq!(App::field_value(fields, 7), "22", "端口默认 22");
             }
             other => panic!("expected form, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn compose_ssh_target_cases() {
+        assert_eq!(
+            App::compose_ssh_target("abc", "h", "22").unwrap(),
+            "abc@h:22"
+        );
+        assert_eq!(App::compose_ssh_target("abc", "h", "").unwrap(), "abc@h");
+        assert_eq!(App::compose_ssh_target("", "h", "").unwrap(), "h");
+        assert_eq!(
+            App::compose_ssh_target(" abc ", " h ", " 22 ").unwrap(),
+            "abc@h:22"
+        );
+        assert!(App::compose_ssh_target("a@b", "h", "").is_err());
+        assert!(App::compose_ssh_target("abc", "a@h", "").is_err());
+        assert!(App::compose_ssh_target("abc", "h", "22x").is_err());
+    }
+
+    #[test]
+    fn split_ssh_target_roundtrip() {
+        assert_eq!(
+            App::split_ssh_target("abc@h:2222"),
+            ("abc".to_string(), "h".to_string(), "2222".to_string())
+        );
+        assert_eq!(
+            App::split_ssh_target("abc@h"),
+            ("abc".to_string(), "h".to_string(), String::new())
+        );
+        assert_eq!(
+            App::split_ssh_target("h"),
+            (String::new(), "h".to_string(), String::new())
+        );
+        // 往返恒等
+        for t in ["abc@h:2222", "abc@h", "h", "h:22"] {
+            let (u, h, p) = App::split_ssh_target(t);
+            assert_eq!(App::compose_ssh_target(&u, &h, &p).unwrap(), t);
+        }
+    }
+
+    #[test]
+    fn add_ssh_project_custom_port_via_form() {
+        // 端口预填 22：Backspace 清空后可填自定义端口。
+        let _guard = crate::store::test_env::lock_appdata();
+        let temp_appdata =
+            std::env::temp_dir().join(format!("pcs_tui_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_appdata).unwrap();
+        let _appdata = crate::store::test_env::AppdataGuard::redirect(&temp_appdata);
+
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.left_sel = 0;
+        app.sync_right_pane(&data);
+        app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
+        for c in "srvp".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        // 字段 5：登录用户
+        for _ in 0..5 {
+            app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        }
+        for c in "abc".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        // 字段 6：主机
+        app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        for c in "h".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        // 字段 7：清空预填 22，改填 2222
+        app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        app.handle(key(KeyCode::Backspace), &mut data, &mut config);
+        app.handle(key(KeyCode::Backspace), &mut data, &mut config);
+        for c in "2222".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        app.handle(key(KeyCode::Enter), &mut data, &mut config);
+        match &app.mode {
+            Mode::Browse => {}
+            other => panic!("提交成功应回浏览模式，实际 {other:?}"),
+        }
+        let p = &data.groups[0].projects[1];
+        assert!(p.is_ssh_project());
+        assert_eq!(p.ssh_target, "abc@h:2222");
+
+        let _ = std::fs::remove_dir_all(&temp_appdata);
+    }
+
+    #[test]
+    fn edit_ssh_project_save_unchanged_keeps_target() {
+        // 编辑表单零修改直接保存：反拆再拼接必须恒等，不改写 ssh_target。
+        let _guard = crate::store::test_env::lock_appdata();
+        let temp_appdata =
+            std::env::temp_dir().join(format!("pcs_tui_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_appdata).unwrap();
+        let _appdata = crate::store::test_env::AppdataGuard::redirect(&temp_appdata);
+
+        let mut data = sample();
+        {
+            let p = &mut data.groups[0].projects[0];
+            p.ssh_target = "abc@h:2222".into();
+            p.path = "/opt/x".into();
+        }
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.left_sel = 0;
+        app.sync_right_pane(&data);
+        app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
+        app.handle(key(KeyCode::Enter), &mut data, &mut config);
+        match &app.mode {
+            Mode::Browse => {}
+            other => panic!("提交成功应回浏览模式，实际 {other:?}"),
+        }
+        assert_eq!(data.groups[0].projects[0].ssh_target, "abc@h:2222");
+
+        let _ = std::fs::remove_dir_all(&temp_appdata);
+    }
+
+    #[test]
+    fn add_ssh_project_rejects_at_in_host() {
+        // 主机含 @ 时拼接失败：表单报错不关闭，不产生项目。
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.left_sel = 0;
+        app.sync_right_pane(&data);
+        app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
+        for c in "srv".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        for _ in 0..5 {
+            app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        }
+        for c in "abc".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        for c in "a@h".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        app.handle(key(KeyCode::Enter), &mut data, &mut config);
+        match &app.mode {
+            Mode::Form { error, .. } => {
+                assert!(error.as_ref().is_some_and(|e| e.contains('@')));
+            }
+            other => panic!("应留在表单并报错，实际 {other:?}"),
+        }
+        assert_eq!(data.groups[0].projects.len(), 1);
+    }
+
+    #[test]
+    fn edit_normal_project_converts_to_ssh_via_form() {
+        // 普通项目编辑表单填写用户/主机即转为 SSH 项目（第三条保存路径）。
+        let _guard = crate::store::test_env::lock_appdata();
+        let temp_appdata =
+            std::env::temp_dir().join(format!("pcs_tui_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_appdata).unwrap();
+        let _appdata = crate::store::test_env::AppdataGuard::redirect(&temp_appdata);
+
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.left_sel = 0;
+        app.sync_right_pane(&data);
+        app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
+        // 字段 5：登录用户
+        for _ in 0..5 {
+            app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        }
+        for c in "abc".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        // 字段 6：主机
+        app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        for c in "h".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        // 字段 7 端口预填 22 留用；字段 8 远程路径
+        app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        for c in "/opt/r".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        app.handle(key(KeyCode::Enter), &mut data, &mut config);
+        match &app.mode {
+            Mode::Browse => {}
+            other => panic!("提交成功应回浏览模式，实际 {other:?}"),
+        }
+        let p = &data.groups[0].projects[0];
+        assert!(p.is_ssh_project());
+        assert_eq!(p.ssh_target, "abc@h:22");
+        assert_eq!(p.path, "/opt/r");
+
+        let _ = std::fs::remove_dir_all(&temp_appdata);
+    }
+
+    #[test]
+    fn add_project_ignores_ssh_user_when_host_empty() {
+        // 主机留空时即便填了登录用户也按普通项目保存（user 字段静默忽略）。
+        let _guard = crate::store::test_env::lock_appdata();
+        let temp_appdata =
+            std::env::temp_dir().join(format!("pcs_tui_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_appdata).unwrap();
+        let _appdata = crate::store::test_env::AppdataGuard::redirect(&temp_appdata);
+
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.left_sel = 0;
+        app.sync_right_pane(&data);
+        app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
+        for c in "srv".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        // Tab 到字段 4（WSL 路径，普通项目路径二选一）
+        for _ in 0..4 {
+            app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        }
+        for c in "/srv".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        // 字段 5：登录用户（主机留空，应被忽略）
+        app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        for c in "abc".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        app.handle(key(KeyCode::Enter), &mut data, &mut config);
+        match &app.mode {
+            Mode::Browse => {}
+            other => panic!("提交成功应回浏览模式，实际 {other:?}"),
+        }
+        assert_eq!(data.groups[0].projects.len(), 2);
+        let p = &data.groups[0].projects[1];
+        assert!(!p.is_ssh_project());
+        assert!(p.ssh_target.is_empty());
+        assert_eq!(p.wsl_path, "/srv");
+
+        let _ = std::fs::remove_dir_all(&temp_appdata);
     }
 }

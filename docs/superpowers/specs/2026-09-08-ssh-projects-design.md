@@ -66,7 +66,7 @@ pcs 是单二进制，**自己充当 SSH_ASKPASS 程序**。⚠️ **版本依�
 
 1. `pcs` 启动 ssh 前：若 `sshPasswordEnc` 或 `sshKeyPassEnc` 非空，尝试解密；**解密失败一律降级为不注入 env（回退交互输密码），绝不 panic、绝不断连**。
 2. 解密成功则注入 env：`SSH_ASKPASS=<pcs.exe 自身路径>`、`SSH_ASKPASS_REQUIRE=force`、`DISPLAY=:0`、`PCS_ASKPASS_ID=<项目uuid>`、`PCS_ASKPASS_TOKEN=<随机 32 字节 hex>`、`PCS_ASKPASS_TOKEN_FILE=<数据根>\keys_tmp\askpass-<uuid>.token`。**env 中只有 id 与 token 路径，无明文秘密**；token 本体同时写入该校验文件，供 `__askpass` 比对（实现 §3.5 的「不匹配 → 输出空」）。ssh 退出后 `wait_spawned()` 覆写删除校验文件；进程崩溃残留由启动维护的 `keys_tmp` 清理兜底。**仅当项目存有可解密的密码/口令时才注入**——无保存秘密时不注入（force 会把交互密码提示也路由到 askpass 并回空，用户反而无法手动输密码）。
-3. ssh 请求秘密时回调 `pcs __askpass`（隐藏子命令，见 §8）：校验 token（env 值与校验文件内容一致，64 位 hex，大小写不敏感）→ 按 prompt 分派 → DPAPI 解密 → 输出到 stdout。
+3. ssh 请求秘密时回调 `pcs.exe <prompt>`（OpenSSH 的 `SSH_ASKPASS` 协议：直接把 prompt 当 argv[1]，**不会**带 `__askpass` 子命令）。pcs 在 `Cli::parse` 之前检测 `PCS_ASKPASS_TOKEN` 环境变量即进入 askpass 路径，避免 clap 把 prompt 当未识别子命令写 stderr。隐藏子命令 `pcs __askpass <prompt>` 仍保留供手工/测试。校验 token（env 值与校验文件内容一致，64 位 hex，大小写不敏感）→ 按 prompt 分派 → DPAPI 解密 → 输出到 stdout。
 4. **prompt 分派规则**：prompt 含 `password`/`密码` → 回密码；含 `passphrase` → 回口令；**其余（host key 的 yes/no 等）一律输出空，绝不代答**，避免绕过 TOFU 确认。
 5. token 缺失/不匹配/校验文件缺失或已删 → 输出空。防护目标：杜绝「直接敲一行 `pcs __askpass <id>` 拿明文」。诚实边界：同 Windows 用户的进程可读取校验文件内容，但该用户本就在 DPAPI 信任边界内（直接跑 `pcs ssh` 也能登录）。
 6. **`__askpass` 全程只读**：仅纯解析 JSON（跳过 id 回填写回与启动维护清理），避免与正在运行的父进程产生 JSON 写竞态。
