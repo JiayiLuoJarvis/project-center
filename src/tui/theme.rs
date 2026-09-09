@@ -10,6 +10,7 @@ pub const TITLE: Color = Color::Rgb(0xbb, 0x9a, 0xf7);
 pub const SUCCESS: Color = Color::Rgb(0x9e, 0xce, 0x6a);
 pub const WARN: Color = Color::Rgb(0xe0, 0xaf, 0x68);
 pub const MUTED: Color = Color::Rgb(0x56, 0x5f, 0x89);
+pub const DIM: Color = Color::Rgb(0x3f, 0x45, 0x69);
 pub const DANGER: Color = Color::Rgb(0xf7, 0x76, 0x8e);
 pub const ACCENT: Color = Color::Rgb(0x7d, 0xcf, 0xff);
 pub const FG: Color = Color::Rgb(0xc0, 0xca, 0xf5);
@@ -36,6 +37,10 @@ pub fn selected() -> Style {
 
 pub fn muted() -> Style {
     Style::default().fg(MUTED)
+}
+
+pub fn dim() -> Style {
+    Style::default().fg(DIM)
 }
 
 pub fn success() -> Style {

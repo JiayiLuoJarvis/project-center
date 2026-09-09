@@ -40,11 +40,11 @@ pub fn project_item(project: &Project, config: &AppConfig) -> ListItem<'static> 
         name_spans.push(Span::styled("WSL", theme::warn()));
     }
     let path_line = if path.is_empty() {
-        Line::from(Span::styled("（无路径）", theme::muted()))
+        Line::from(Span::styled("（无路径）", theme::dim()))
     } else {
-        Line::from(Span::styled(truncate_width(&path, 60), theme::muted()))
+        Line::from(Span::styled(truncate_width(&path, 60), theme::dim()))
     };
-    ListItem::new(vec![Line::from(name_spans), path_line])
+    ListItem::new(vec![Line::from(name_spans), path_line, Line::from("")])
 }
 
 /// SSH 远程项目行：黄色 `SSH` 标签 + 远程路径。
@@ -69,11 +69,11 @@ fn ssh_project_item(project: &Project) -> ListItem<'static> {
         }
     );
     let path_line = if remote.is_empty() {
-        Line::from(Span::styled("（无目标）", theme::muted()))
+        Line::from(Span::styled("（无目标）", theme::dim()))
     } else {
-        Line::from(Span::styled(truncate_width(&remote, 60), theme::muted()))
+        Line::from(Span::styled(truncate_width(&remote, 60), theme::dim()))
     };
-    ListItem::new(vec![Line::from(name_spans), path_line])
+    ListItem::new(vec![Line::from(name_spans), path_line, Line::from("")])
 }
 
 pub fn trash_item(item: &DeletedItem) -> ListItem<'static> {
