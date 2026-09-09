@@ -198,6 +198,20 @@ fn random_token_hex() -> Result<String, String> {
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
+/// 把 askpass token 写入数据根 `keys_tmp\`，供 `__askpass` 与 env 中的
+/// token 比对（设计 §3.5：token 缺失/不匹配 → 输出空，防直调拿明文）。
+/// ssh 退出后由 `wait_spawned` 覆写删除；进程崩溃残留由启动维护兜底。
+fn write_askpass_token_file_in(dir: &std::path::Path, token: &str) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建 keys_tmp 失败: {e}"))?;
+    let path = dir.join(format!("askpass-{}.token", uuid::Uuid::new_v4()));
+    std::fs::write(&path, token).map_err(|e| format!("写入 token 校验文件失败: {e}"))?;
+    Ok(path)
+}
+
+fn write_askpass_token_file(token: &str) -> Result<PathBuf, String> {
+    write_askpass_token_file_in(&secret::data_root().join("keys_tmp"), token)
+}
+
 /// 父进程预解密验证：所有已保存的秘密都能解开才注入 askpass env
 ///（否则 force 模式下 askpass 输出空会导致认证必败且无法回退 tty 提示）。
 fn askpass_env_ok(p: &Project) -> bool {
@@ -208,12 +222,20 @@ fn askpass_env_ok(p: &Project) -> bool {
     password_ok && key_pass_ok
 }
 
+/// 项目是否存有任一密码/口令密文：askpass 注入的前提。
+/// 无秘密时不注入——force 会把交互密码提示也路由到 askpass（输出空），
+/// 用户反而无法手动输密码登录。
+fn has_saved_secrets(p: &Project) -> bool {
+    !p.ssh_password_enc.trim().is_empty() || !p.ssh_key_pass_enc.trim().is_empty()
+}
+
 fn spawn_ssh(p: &Project, group_name: &str) -> Result<SpawnedDirect, String> {
     set_console_title(p, group_name);
 
     // 私钥：解密成功才落临时文件；失败降级为不带密钥启动（回退密码/交互）。
     let mut temp_key: Option<PathBuf> = None;
     let mut key_arg: Option<String> = None;
+    let mut temp_token: Option<PathBuf> = None;
     if !p.ssh_key_file.trim().is_empty() {
         match secret::read_key_file(&p.ssh_key_file) {
             Ok(mut plain) => {
@@ -241,18 +263,28 @@ fn spawn_ssh(p: &Project, group_name: &str) -> Result<SpawnedDirect, String> {
     let mut cmd = Command::new("ssh");
     cmd.args(ssh_args(&p.ssh_target, key_arg.as_deref(), &p.path));
 
-    // askpass 自动填充：env 只携带项目 id 与一次性 token，秘密由 __askpass 自行解密。
-    if !askpass_env_ok(p) {
+    // askpass 自动填充：仅当存有可解密的密码/口令时注入；
+    // env 只携带项目 id 与一次性 token，秘密由 __askpass 自行解密。
+    if !has_saved_secrets(p) {
+        // 无保存秘密：不注入，全部走正常交互（密码/口令/host key 确认）。
+    } else if !askpass_env_ok(p) {
         eprintln!("提示：保存的密码/口令解密失败，本次回退交互输入。");
     } else if let Ok(exe) = std::env::current_exe() {
         match random_token_hex() {
-            Ok(token) => {
-                cmd.env("SSH_ASKPASS", &exe);
-                cmd.env("SSH_ASKPASS_REQUIRE", "force");
-                cmd.env("DISPLAY", ":0");
-                cmd.env("PCS_ASKPASS_ID", &p.id);
-                cmd.env("PCS_ASKPASS_TOKEN", token);
-            }
+            Ok(token) => match write_askpass_token_file(&token) {
+                Ok(token_path) => {
+                    cmd.env("SSH_ASKPASS", &exe);
+                    cmd.env("SSH_ASKPASS_REQUIRE", "force");
+                    cmd.env("DISPLAY", ":0");
+                    cmd.env("PCS_ASKPASS_ID", &p.id);
+                    cmd.env("PCS_ASKPASS_TOKEN", &token);
+                    cmd.env("PCS_ASKPASS_TOKEN_FILE", &token_path);
+                    temp_token = Some(token_path);
+                }
+                Err(e) => {
+                    eprintln!("警告：askpass 校验文件写入失败（{e}），本次回退交互输入。")
+                }
+            },
             Err(e) => eprintln!("警告：随机 token 生成失败（{e}），本次回退交互输入。"),
         }
     }
@@ -261,10 +293,14 @@ fn spawn_ssh(p: &Project, group_name: &str) -> Result<SpawnedDirect, String> {
         Ok(child) => Ok(SpawnedDirect {
             child: Some(child),
             temp_key_path: temp_key,
+            temp_token_path: temp_token,
         }),
         Err(e) => {
-            // 启动失败也要清掉刚落的临时密钥。
+            // 启动失败也要清掉刚落的临时密钥与 token 校验文件。
             if let Some(path) = &temp_key {
+                secret::shred_and_remove(path);
+            }
+            if let Some(path) = &temp_token {
                 secret::shred_and_remove(path);
             }
             Err(format!("SSH 启动失败: {e}"))
@@ -273,11 +309,13 @@ fn spawn_ssh(p: &Project, group_name: &str) -> Result<SpawnedDirect, String> {
 }
 
 /// 一次成功 spawn 的产物：子进程（IDE/资源管理器为 `None`）与
-/// SSH 临时密钥文件路径（非 SSH 为 `None`）。
+/// SSH 临时密钥/askpass token 文件路径（非 SSH 为 `None`）。
 pub struct SpawnedDirect {
     pub child: Option<std::process::Child>,
     /// SSH 场景的明文密钥临时文件；`wait_spawned` 退出后覆写删除。
     pub temp_key_path: Option<PathBuf>,
+    /// SSH 场景的 askpass token 校验文件；`wait_spawned` 退出后覆写删除。
+    pub temp_token_path: Option<PathBuf>,
 }
 
 /// 生成子进程（不等待）。校验 Windows 路径可用性（与旧 `launch_direct` 语义一致）。
@@ -318,32 +356,40 @@ pub fn spawn_direct(
         LaunchEnv::Wsl => spawn_wsl(p, group_name, command).map(|child| SpawnedDirect {
             child: Some(child),
             temp_key_path: None,
+            temp_token_path: None,
         }),
         LaunchEnv::PowerShell => {
             spawn_powershell(p, group_name, command).map(|child| SpawnedDirect {
                 child: Some(child),
                 temp_key_path: None,
+                temp_token_path: None,
             })
         }
         LaunchEnv::Ide => spawn_ide(p, command).map(|_| SpawnedDirect {
             child: None,
             temp_key_path: None,
+            temp_token_path: None,
         }),
         LaunchEnv::Explorer => spawn_explorer(p).map(|_| SpawnedDirect {
             child: None,
             temp_key_path: None,
+            temp_token_path: None,
         }),
         LaunchEnv::Ssh => unreachable!("已在上方处理"),
     }
 }
 
-/// 等待子进程退出（阻塞、抑制 Ctrl+C），随后清理 SSH 临时密钥文件。
+/// 等待子进程退出（阻塞、抑制 Ctrl+C），随后清理 SSH 临时密钥与
+/// askpass token 校验文件（成功/失败/中断都走）。
 pub fn wait_spawned(spawned: SpawnedDirect) -> Result<(), String> {
     let result = match spawned.child {
         Some(child) => wait_console_child(child).map_err(|e| format!("等待子进程结束失败: {e}")),
         None => Ok(()),
     };
     if let Some(path) = spawned.temp_key_path {
+        secret::shred_and_remove(&path);
+    }
+    if let Some(path) = spawned.temp_token_path {
         secret::shred_and_remove(&path);
     }
     result
@@ -471,11 +517,41 @@ mod tests {
     }
 
     #[test]
+    fn has_saved_secrets_gates_askpass_injection() {
+        let mut p = Project::new("srv", "", "");
+        // 无任何秘密：不注入（force 会劫持交互密码提示）
+        assert!(!has_saved_secrets(&p));
+        // 仅密码 / 仅口令 / 都有：注入
+        p.ssh_password_enc = secret::protect("pw").unwrap();
+        assert!(has_saved_secrets(&p));
+        let mut p2 = Project::new("srv", "", "");
+        p2.ssh_key_pass_enc = secret::protect("kp").unwrap();
+        assert!(has_saved_secrets(&p2));
+        // 空白密文视同未保存
+        let mut p3 = Project::new("srv", "", "");
+        p3.ssh_password_enc = "  ".into();
+        assert!(!has_saved_secrets(&p3));
+    }
+
+    #[test]
     fn random_token_hex_is_64_chars() {
         let t = random_token_hex().unwrap();
         assert_eq!(t.len(), 64);
         assert!(t.bytes().all(|b| b.is_ascii_hexdigit()));
         assert_ne!(t, random_token_hex().unwrap(), "token 必须随机");
+    }
+
+    #[test]
+    fn askpass_token_file_round_trip() {
+        let dir = std::env::temp_dir().join(format!("pcs_tok_{}", uuid::Uuid::new_v4()));
+        let token = random_token_hex().unwrap();
+        let path = write_askpass_token_file_in(&dir, &token).unwrap();
+        assert!(path.parent().unwrap() == dir);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), token);
+        // 每次写入使用随机文件名，并发会话互不覆盖
+        let other = write_askpass_token_file_in(&dir, &token).unwrap();
+        assert_ne!(path, other);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

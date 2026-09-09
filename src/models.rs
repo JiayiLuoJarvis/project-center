@@ -63,6 +63,12 @@ impl Project {
         !self.ssh_target.trim().is_empty()
     }
 
+    /// 把项目切换为 SSH 项目（add 入口使用）。
+    pub fn with_ssh_target(mut self, target: impl Into<String>) -> Self {
+        self.ssh_target = target.into();
+        self
+    }
+
     pub fn with_alias(mut self, alias: impl Into<String>) -> Self {
         self.alias = alias.into();
         self

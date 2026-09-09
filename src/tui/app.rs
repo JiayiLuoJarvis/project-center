@@ -523,6 +523,16 @@ impl App {
         ]
     }
 
+    /// 新增表单：基础字段 + SSH 秘密字段（7 密钥来源 / 8 密码 / 9 口令，
+    /// 仅 SSH 目标非空时生效），新增即可直接保存秘密，无需二次编辑。
+    fn project_add_fields() -> Vec<FormField> {
+        let mut fields = Self::project_form_fields("", "", "", "");
+        fields.push(Self::text_field("私钥来源路径（SSH 项目，可选）", ""));
+        fields.push(Self::password_field("登录密码（SSH 项目，可选）"));
+        fields.push(Self::password_field("私钥口令（SSH 项目，可选）"));
+        fields
+    }
+
     /// 编辑表单：SSH 项目用 SSH 专用字段；普通项目附 SSH 转换字段。
     fn project_edit_fields(p: &Project) -> Vec<FormField> {
         if p.is_ssh_project() {
@@ -1084,7 +1094,7 @@ impl App {
                     let group = data.groups[gi].name.clone();
                     self.open_form(
                         "新增项目",
-                        Self::project_form_fields("", "", "", ""),
+                        Self::project_add_fields(),
                         FormKind::AddProject { group },
                     );
                 }
@@ -1978,7 +1988,20 @@ impl App {
                 let ssh_target = Self::field_value(fields, 5);
                 if !ssh_target.trim().is_empty() {
                     let remote = Self::field_value(fields, 6);
-                    actions::add_project_ssh(data, &group, &name, &alias, &ssh_target, &remote)
+                    let key_source = Self::field_value(fields, 7);
+                    let password = Self::field_value(fields, 8);
+                    let key_pass = Self::field_value(fields, 9);
+                    actions::add_project_ssh(
+                        data,
+                        &group,
+                        &name,
+                        &alias,
+                        &ssh_target,
+                        &remote,
+                        &key_source,
+                        &password,
+                        &key_pass,
+                    )
                 } else {
                     let path = Self::field_value(fields, 2);
                     let wsl = Self::field_value(fields, 4);
@@ -2837,13 +2860,13 @@ mod tests {
 
     #[test]
     fn add_ssh_project_via_form() {
-        // 提交会经 actions::save_data 写真实数据根：把 APPDATA 指向临时目录，
-        // 避免污染 projects.json（并发下 rename 也可能冲突导致保存失败）。
+        // 提交会经 actions::save_data 写真实数据根：串行 + 把 APPDATA 指向
+        // 临时目录，避免污染 projects.json（并发下 rename 也可能冲突导致保存失败）。
+        let _guard = crate::store::test_env::lock_appdata();
         let temp_appdata =
             std::env::temp_dir().join(format!("pcs_tui_test_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&temp_appdata).unwrap();
-        let saved_appdata = std::env::var_os("APPDATA");
-        unsafe { std::env::set_var("APPDATA", &temp_appdata) };
+        let _appdata = crate::store::test_env::AppdataGuard::redirect(&temp_appdata);
 
         let mut data = sample();
         let mut config = AppConfig::defaults();
@@ -2878,13 +2901,74 @@ mod tests {
         assert_eq!(p.path, "/opt/x");
         assert!(p.wsl_path.is_empty());
 
-        // 还原 APPDATA 并清理临时数据根
-        unsafe {
-            match saved_appdata {
-                Some(value) => std::env::set_var("APPDATA", value),
-                None => std::env::remove_var("APPDATA"),
-            }
+        let _ = std::fs::remove_dir_all(&temp_appdata);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn add_ssh_project_with_secrets_via_form() {
+        // 新增表单直接携带密钥/密码/口令：一次提交完成秘密保存（设计 §9）。
+        let _guard = crate::store::test_env::lock_appdata();
+        let temp_appdata =
+            std::env::temp_dir().join(format!("pcs_tui_test_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_appdata).unwrap();
+        let _appdata = crate::store::test_env::AppdataGuard::redirect(&temp_appdata);
+
+        // 准备一个可导入的私钥源文件
+        let key_source = temp_appdata.join("source_key");
+        std::fs::write(&key_source, "-----BEGIN OPENSSH PRIVATE KEY-----").unwrap();
+
+        let mut data = sample();
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.left_sel = 0;
+        app.sync_right_pane(&data);
+        app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
+        for c in "srv".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
         }
+        // Tab 到字段 5（SSH 目标）
+        for _ in 0..5 {
+            app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        }
+        for c in "abc@h".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        // 字段 7：私钥来源路径
+        for _ in 0..2 {
+            app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        }
+        for c in key_source.to_string_lossy().chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        // 字段 8：登录密码
+        app.handle(key(KeyCode::Tab), &mut data, &mut config);
+        for c in "pw123".chars() {
+            app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+        }
+        // 字段 9：私钥口令留空，直接提交
+        app.handle(key(KeyCode::Enter), &mut data, &mut config);
+        match &app.mode {
+            Mode::Browse => {}
+            other => panic!("提交成功应回浏览模式，实际 {other:?}"),
+        }
+        let p = &data.groups[0].projects[1];
+        assert!(p.is_ssh_project());
+        assert!(!p.ssh_password_enc.is_empty(), "密码应已加密保存");
+        assert_eq!(
+            crate::secret::unprotect(&p.ssh_password_enc).unwrap(),
+            "pw123"
+        );
+        assert!(!p.ssh_key_file.is_empty(), "密钥应已导入 sidecar");
+        assert_eq!(
+            crate::secret::read_key_file(&p.ssh_key_file).unwrap(),
+            "-----BEGIN OPENSSH PRIVATE KEY-----"
+        );
+        assert_eq!(p.ssh_key_path, key_source.to_string_lossy());
+        // 普通项目路径未受影响
+        assert!(p.wsl_path.is_empty());
+
         let _ = std::fs::remove_dir_all(&temp_appdata);
     }
 

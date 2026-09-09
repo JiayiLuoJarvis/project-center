@@ -242,6 +242,9 @@ pub struct PinRecord {
 }
 
 pub const PIN_ITERATIONS: u32 = 600_000;
+/// `verify_pin` 接受的最大迭代数：config.json 可被手工篡改成超大值导致每次
+/// 校验挂死（本机 DoS），钳制上限；超过上限的记录校验必败（视为损坏记录）。
+const MAX_VERIFY_ITERATIONS: u32 = 2_000_000;
 const SALT_LEN: usize = 16;
 const HASH_LEN: usize = 32;
 
@@ -273,7 +276,12 @@ pub fn verify_pin(pin: &str, record: &PinRecord) -> Result<bool, String> {
         return Err("PIN 哈希长度异常".into());
     }
     let mut actual = [0u8; HASH_LEN];
-    pbkdf2_sha256(pin.as_bytes(), &salt, record.iterations, &mut actual)?;
+    pbkdf2_sha256(
+        pin.as_bytes(),
+        &salt,
+        record.iterations.min(MAX_VERIFY_ITERATIONS),
+        &mut actual,
+    )?;
     let mut diff = 0u8;
     for (a, b) in actual.iter().zip(expected.iter()) {
         diff |= a ^ b;
@@ -397,13 +405,47 @@ fn existing_key_files_in(root: &Path) -> Vec<String> {
         .collect()
 }
 
+/// `keys_tmp\` 会话文件保留阈值：存活会话（ssh 进行中）的临时密钥与
+/// askpass token 校验文件可能被其他 pcs 进程的启动维护扫到，
+/// 按修改时间跳过新于阈值的文件；崩溃残留超过阈值由下次维护兜底。
+const KEYS_TMP_KEEP_SECS: u64 = 3600;
+
+/// 覆写清空 `keys_tmp\` 中早于 `cutoff` 的残留文件
+///（`modified > cutoff` 视为活跃会话文件，跳过）。
+fn shred_keys_tmp_in(root: &Path, cutoff: std::time::SystemTime) {
+    let Ok(entries) = std::fs::read_dir(root.join("keys_tmp")) else {
+        return;
+    };
+    for entry in entries.filter_map(|entry| entry.ok()) {
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let recent = entry
+            .metadata()
+            .and_then(|meta| meta.modified())
+            .map(|modified| modified > cutoff)
+            .unwrap_or(false);
+        if recent {
+            continue;
+        }
+        shred_and_remove(&entry.path());
+    }
+}
+
 /// 启动维护（幂等，每次数据加载后调用一次）：
 /// 1. 重试 `pendingKeyDeletes`（删除失败延迟重试）；
-/// 2. 以 JSON 引用为准清理 `keys\` 下孤儿 key 文件；
-/// 3. 覆写清空 `keys_tmp\` 残留。
+/// 2. 以 JSON 引用为准清理 `keys\` 下孤儿 key 文件（仅 `allow_orphan_sweep` 时执行）；
+/// 3. 覆写清空 `keys_tmp\` 残留与 `keys\*.key.tmp` 写失败残留。
+///
+/// `allow_orphan_sweep=false` 用于数据退化场景（JSON 损坏且无备份、备份恢复）：
+/// 引用集不可信，绝不能清理，否则会把全部密文 sidecar 当孤儿销毁。
 ///
 /// 返回数据是否被修改（`pendingKeyDeletes` 摘除）。
-pub fn startup_maintenance_in(root: &Path, data: &mut ProjectData) -> bool {
+pub fn startup_maintenance_in(
+    root: &Path,
+    data: &mut ProjectData,
+    allow_orphan_sweep: bool,
+) -> bool {
     let mut changed = false;
 
     // 1. 重试待删除列表
@@ -414,27 +456,37 @@ pub fn startup_maintenance_in(root: &Path, data: &mut ProjectData) -> bool {
     }
 
     // 2. 孤儿 key 清理（以 JSON 引用为准，不按 id 推导）
-    let refs = referenced_key_files(data);
-    for relative in existing_key_files_in(root) {
-        if !refs.contains(&relative) {
-            let _ = delete_key_file_in(root, &relative);
+    if allow_orphan_sweep {
+        let refs = referenced_key_files(data);
+        for relative in existing_key_files_in(root) {
+            if !refs.contains(&relative) {
+                let _ = delete_key_file_in(root, &relative);
+            }
         }
     }
 
-    // 3. keys_tmp 残留清理
-    if let Ok(entries) = std::fs::read_dir(root.join("keys_tmp")) {
+    // 3. `keys\*.key.tmp` 写失败残留：永不被引用，无条件覆写删除
+    if let Ok(entries) = std::fs::read_dir(root.join("keys")) {
         for entry in entries.filter_map(|entry| entry.ok()) {
-            if entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".key.tmp") {
                 shred_and_remove(&entry.path());
             }
         }
     }
 
+    // 4. keys_tmp 残留清理（跳过阈值内的活跃会话文件）
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(KEYS_TMP_KEEP_SECS);
+    shred_keys_tmp_in(root, cutoff);
+
     changed
 }
 
-pub fn startup_maintenance(data: &mut ProjectData) -> bool {
-    startup_maintenance_in(&data_root(), data)
+pub fn startup_maintenance(data: &mut ProjectData, allow_orphan_sweep: bool) -> bool {
+    startup_maintenance_in(&data_root(), data, allow_orphan_sweep)
 }
 
 #[cfg(test)]
@@ -576,28 +628,99 @@ mod tests {
         std::fs::create_dir_all(root.join("keys_tmp")).unwrap();
         std::fs::write(root.join("keys").join("keep.key"), "enc").unwrap();
         std::fs::write(root.join("keys").join("orphan.key"), "enc").unwrap();
+        std::fs::write(root.join("keys").join("leftover.key.tmp"), "enc").unwrap();
         std::fs::write(root.join("keys_tmp").join("leftover"), "plain").unwrap();
 
         // pending 指向一个删除会成功的文件 -> 摘除并标记 changed
         std::fs::write(root.join("keys").join("gone.key"), "enc").unwrap();
         data.pending_key_deletes.push("keys/gone.key".into());
-        assert!(startup_maintenance_in(&root, &mut data));
+        assert!(startup_maintenance_in(&root, &mut data, true));
         assert!(data.pending_key_deletes.is_empty());
 
-        // 孤儿与 keys_tmp 残留被清理，被引用的保留
+        // 孤儿与 tmp 残留被清理，被引用的保留；
+        // keys_tmp 会话文件新于阈值 -> 启动维护跳过（活跃会话保护）
         assert!(root.join("keys").join("keep.key").exists());
         assert!(!root.join("keys").join("orphan.key").exists());
-        assert!(root.join("keys_tmp").read_dir().unwrap().next().is_none());
+        assert!(!root.join("keys").join("leftover.key.tmp").exists());
+        assert!(root.join("keys_tmp").join("leftover").exists());
 
         // 再跑一次：无 pending、无变化 -> 返回 false（幂等）
-        assert!(!startup_maintenance_in(&root, &mut data));
+        assert!(!startup_maintenance_in(&root, &mut data, true));
 
         // busy.key 是目录，删除失败 -> 留在待删列表，等待下次重试
         std::fs::create_dir_all(root.join("keys").join("busy.key")).unwrap();
         data.pending_key_deletes.push("keys/busy.key".into());
-        let _ = startup_maintenance_in(&root, &mut data);
+        let _ = startup_maintenance_in(&root, &mut data, true);
         assert_eq!(data.pending_key_deletes, vec!["keys/busy.key".to_string()]);
 
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn keys_tmp_cleanup_respects_cutoff() {
+        let root = temp_root();
+        std::fs::create_dir_all(root.join("keys_tmp")).unwrap();
+        let file = root.join("keys_tmp").join("session");
+        std::fs::write(&file, "data").unwrap();
+        let now = std::time::SystemTime::now();
+
+        // cutoff 在过去：文件新于阈值 -> 视为活跃会话，跳过
+        shred_keys_tmp_in(
+            &root,
+            now - std::time::Duration::from_secs(KEYS_TMP_KEEP_SECS),
+        );
+        assert!(file.exists(), "新于阈值的会话文件必须保留");
+
+        // cutoff 在未来：文件旧于阈值 -> 覆写删除（崩溃残留兜底路径）
+        shred_keys_tmp_in(
+            &root,
+            now + std::time::Duration::from_secs(KEYS_TMP_KEEP_SECS),
+        );
+        assert!(!file.exists());
+
+        // 目录缺失 / 非 keys_tmp 目录：静默无操作
+        shred_keys_tmp_in(&root, now);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn orphan_sweep_disabled_keeps_all_key_files() {
+        let root = temp_root();
+        let mut data = ProjectData::default();
+        // 数据退化场景：引用集为空（groups/trash 均空）
+        std::fs::create_dir_all(root.join("keys")).unwrap();
+        std::fs::write(root.join("keys").join("precious.key"), "enc").unwrap();
+        std::fs::write(root.join("keys").join("orphan.key"), "enc").unwrap();
+
+        // 不允许清理：密钥文件全部保留（pending 重试与 tmp 清理仍执行）
+        assert!(!startup_maintenance_in(&root, &mut data, false));
+        assert!(root.join("keys").join("precious.key").exists());
+        assert!(root.join("keys").join("orphan.key").exists());
+
+        // 允许清理后：无引用的文件按孤儿删除
+        let _ = startup_maintenance_in(&root, &mut data, true);
+        assert!(!root.join("keys").join("precious.key").exists());
+        assert!(!root.join("keys").join("orphan.key").exists());
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn orphan_sweep_gating_covers_trash_references() {
+        let root = temp_root();
+        let mut data = ProjectData::default();
+        // groups 为空但 trash 快照引用 key：清理仍应安全（引用可信）
+        let mut trashed = ssh_project("keys/in-trash.key");
+        trashed.ssh_key_file = "keys/in-trash.key".into();
+        data.trash.push(DeletedItem::from_project(&trashed, "G", 1));
+        std::fs::create_dir_all(root.join("keys")).unwrap();
+        std::fs::write(root.join("keys").join("in-trash.key"), "enc").unwrap();
+        std::fs::write(root.join("keys").join("orphan.key"), "enc").unwrap();
+        let _ = startup_maintenance_in(&root, &mut data, true);
+        assert!(root.join("keys").join("in-trash.key").exists());
+        assert!(!root.join("keys").join("orphan.key").exists());
         let _ = std::fs::remove_dir_all(&root);
     }
 

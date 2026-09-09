@@ -275,6 +275,10 @@ enum ConfigCommand {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    // `__askpass` 全程只读：提前于 Config::load（其缺失时会写默认配置）。
+    if let Some(Command::Askpass { prompt }) = &cli.command {
+        return cmd_askpass(prompt);
+    }
     let mut config = Config::load();
     match cli.command {
         None | Some(Command::Menu) => {
@@ -299,6 +303,7 @@ fn main() -> Result<()> {
         Some(Command::Trash(command)) => cmd_trash(command),
         Some(Command::Pin(command)) => cmd_pin(command),
         Some(Command::Secret(command)) => cmd_secret(command),
+        // 运行时不可达（上方已提前返回），仅为 match 穷尽性保留。
         Some(Command::Askpass { prompt }) => cmd_askpass(&prompt),
     }
 }
@@ -625,14 +630,6 @@ fn cmd_edit(args: EditArgs) -> Result<()> {
     Ok(())
 }
 
-/// 把项目切换为 SSH 项目（仅 add/edit 入口使用）。
-impl Project {
-    fn with_ssh_target(mut self, target: String) -> Self {
-        self.ssh_target = target;
-        self
-    }
-}
-
 /// 导入私钥与读入密码/口令（stdin），DPAPI 加密后写入项目。
 fn apply_ssh_secrets(
     data: &mut ProjectData,
@@ -854,24 +851,23 @@ fn cmd_run(args: RunArgs) -> Result<()> {
 }
 
 /// 从 stdin 读取一行（`--password-stdin` / `--key-pass-stdin`）。
+/// 控制台输入不回显（设计 §6：密码/口令录入不回显）；
+/// 重定向/管道走普通读行，脚本喂入不受影响。
 fn read_stdin_line(label: &str) -> Result<String> {
-    use std::io::BufRead;
-    eprintln!("请输入{label}（stdin，行尾换行结束）:");
-    let mut line = String::new();
-    std::io::stdin().lock().read_line(&mut line)?;
-    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+    read_hidden_line(&format!("请输入{label}: "))
 }
 
 /// 不回显读入一行：控制台走 Win32 逐字符读；重定向/管道回退普通 stdin。
+/// 提示语走 stderr，保持 stdout 干净供脚本使用。
 #[cfg(windows)]
 fn read_hidden_line(prompt: &str) -> Result<String> {
     use windows_sys::Win32::System::Console::{
         ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT, GetConsoleMode, GetStdHandle,
         ReadConsoleW, STD_INPUT_HANDLE, SetConsoleMode,
     };
-    print!("{prompt}");
+    eprint!("{prompt}");
     use std::io::Write as _;
-    std::io::stdout().flush()?;
+    std::io::stderr().flush()?;
 
     unsafe {
         let handle = GetStdHandle(STD_INPUT_HANDLE);
@@ -907,7 +903,7 @@ fn read_hidden_line(prompt: &str) -> Result<String> {
                     }
                 }
                 SetConsoleMode(handle, original);
-                println!();
+                eprintln!();
                 return Ok(String::from_utf16_lossy(&chars));
             }
         }
@@ -920,9 +916,9 @@ fn read_hidden_line(prompt: &str) -> Result<String> {
 
 #[cfg(not(windows))]
 fn read_hidden_line(prompt: &str) -> Result<String> {
-    print!("{prompt}");
+    eprint!("{prompt}");
     use std::io::Write as _;
-    std::io::stdout().flush()?;
+    std::io::stderr().flush()?;
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     Ok(line.trim_end_matches(['\r', '\n']).to_string())
@@ -1084,13 +1080,33 @@ fn askpass_kind(prompt: &str) -> AskpassKind {
     }
 }
 
+/// askpass token 校验：env 中 token 必须与父进程落在
+/// `PCS_ASKPASS_TOKEN_FILE` 的内容一致（64 位 hex）。
+/// 缺失/不匹配一律拒绝（设计 §3.5：防「直接敲一行 `pcs __askpass` 拿明文」；
+/// 诚实边界：同 Windows 用户进程可读取文件内容，本就在 DPAPI 信任边界内）。
+fn askpass_token_ok(token: &str, token_file: &str) -> bool {
+    let token = token.trim();
+    if token.len() != 64 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return false;
+    }
+    let path = token_file.trim();
+    if path.is_empty() {
+        return false;
+    }
+    match std::fs::read_to_string(path) {
+        Ok(expected) => expected.trim().eq_ignore_ascii_case(token),
+        Err(_) => false,
+    }
+}
+
 /// SSH_ASKPASS 回调：校验 token -> 按 prompt 分派 -> 解密 -> stdout。
 /// 只读加载（不写回、不维护），避免与父进程的 projects.json 写竞态。
 /// 非密码/口令类 prompt（host key 的 yes/no 等）一律输出空，绝不代答。
 fn cmd_askpass(prompt: &str) -> Result<()> {
     let token = std::env::var("PCS_ASKPASS_TOKEN").unwrap_or_default();
-    if token.trim().is_empty() {
-        // 未经历 pcs 注入：拒绝输出。
+    let token_file = std::env::var("PCS_ASKPASS_TOKEN_FILE").unwrap_or_default();
+    if !askpass_token_ok(&token, &token_file) {
+        // token 缺失/不匹配：拒绝输出。
         return Ok(());
     }
     let id = std::env::var("PCS_ASKPASS_ID").unwrap_or_default();
@@ -1169,6 +1185,51 @@ mod tests {
             AskpassKind::Ignore
         );
         assert_eq!(askpass_kind("Verification code: "), AskpassKind::Ignore);
+    }
+
+    fn temp_token_file(content: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("pcs_askpass_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("askpass.token");
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    fn cleanup_token_file(path: &std::path::Path) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
+    }
+
+    #[test]
+    fn askpass_token_ok_requires_matching_file() {
+        let token = "a1B2c3D4e5F6a1B2c3D4e5F6a1B2c3D4e5F6a1B2c3D4e5F6a1B2c3D4e5F6a1B2";
+        let path = temp_token_file(token);
+        // 匹配（大小写不敏感）
+        assert!(askpass_token_ok(token, &path.to_string_lossy()));
+        assert!(askpass_token_ok(
+            &token.to_uppercase(),
+            &path.to_string_lossy()
+        ));
+        // 不匹配 / 缺失 / 空
+        assert!(!askpass_token_ok("ff", &path.to_string_lossy()));
+        assert!(!askpass_token_ok("", &path.to_string_lossy()));
+        assert!(!askpass_token_ok(token, ""));
+        assert!(!askpass_token_ok(token, "Z:\\no\\such\\file.token"));
+        // env 伪造 token 但文件缺失 -> 拒绝
+        assert!(!askpass_token_ok(token, "  "));
+        cleanup_token_file(&path);
+        // 文件被删除后（ssh 已退出的正常清理）即拒绝
+        assert!(!askpass_token_ok(token, &path.to_string_lossy()));
+    }
+
+    #[test]
+    fn askpass_token_ok_rejects_malformed_token() {
+        let path = temp_token_file("x");
+        // 非 hex / 长度不对的 token 一律拒绝，无论文件内容
+        assert!(!askpass_token_ok("xyz", &path.to_string_lossy()));
+        assert!(!askpass_token_ok("ff", &path.to_string_lossy()));
+        cleanup_token_file(&path);
     }
     use crate::models::Group;
 

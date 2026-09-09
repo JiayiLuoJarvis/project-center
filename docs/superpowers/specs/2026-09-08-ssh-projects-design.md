@@ -1,7 +1,7 @@
 # SSH 远程项目与秘密存储 — 设计文档
 
 日期：2026-09-08
-状态：已与用户逐项确认；2026-09-08 按审查结论修订（v2），待实施
+状态：已与用户逐项确认；2026-09-08 按审查结论修订（v2）；2026-09-08 实施审查后修订（v3，见 §11 spike 结论与 §12 偏差修正）
 关联：`docs/spec.md`（§7 启动表实施时补充 SSH 一节）
 
 ## 1. 目标与范围
@@ -65,17 +65,17 @@
 pcs 是单二进制，**自己充当 SSH_ASKPASS 程序**。⚠️ **版本依赖未验证**：`SSH_ASKPASS_REQUIRE=force` 需较新 OpenSSH（老版本仅有 `require`，有 tty 时不会走 askpass；Win32-OpenSSH 对该机制的支持需实测）。**实施第 0 步为 spike**：本机 `ssh -V` + 一次性脚本实测 askpass 注入是否生效，再决定注入 `force` 还是降级。不支持时自动填密码不可用、手动输密码不受影响（不注入 env 即自然回退）：
 
 1. `pcs` 启动 ssh 前：若 `sshPasswordEnc` 或 `sshKeyPassEnc` 非空，尝试解密；**解密失败一律降级为不注入 env（回退交互输密码），绝不 panic、绝不断连**。
-2. 解密成功则注入 env：`SSH_ASKPASS=<pcs.exe 自身路径>`、`SSH_ASKPASS_REQUIRE=force`、`PCS_ASKPASS_ID=<项目uuid>`、`PCS_ASKPASS_TOKEN=<随机 32 字节 hex>`。**env 中只有 id 与 token，无明文秘密**。
-3. ssh 请求秘密时回调 `pcs __askpass`（隐藏子命令，见 §8）：校验 token → 按 prompt 分派 → DPAPI 解密 → 输出到 stdout。
+2. 解密成功则注入 env：`SSH_ASKPASS=<pcs.exe 自身路径>`、`SSH_ASKPASS_REQUIRE=force`、`DISPLAY=:0`、`PCS_ASKPASS_ID=<项目uuid>`、`PCS_ASKPASS_TOKEN=<随机 32 字节 hex>`、`PCS_ASKPASS_TOKEN_FILE=<数据根>\keys_tmp\askpass-<uuid>.token`。**env 中只有 id 与 token 路径，无明文秘密**；token 本体同时写入该校验文件，供 `__askpass` 比对（实现 §3.5 的「不匹配 → 输出空」）。ssh 退出后 `wait_spawned()` 覆写删除校验文件；进程崩溃残留由启动维护的 `keys_tmp` 清理兜底。**仅当项目存有可解密的密码/口令时才注入**——无保存秘密时不注入（force 会把交互密码提示也路由到 askpass 并回空，用户反而无法手动输密码）。
+3. ssh 请求秘密时回调 `pcs __askpass`（隐藏子命令，见 §8）：校验 token（env 值与校验文件内容一致，64 位 hex，大小写不敏感）→ 按 prompt 分派 → DPAPI 解密 → 输出到 stdout。
 4. **prompt 分派规则**：prompt 含 `password`/`密码` → 回密码；含 `passphrase` → 回口令；**其余（host key 的 yes/no 等）一律输出空，绝不代答**，避免绕过 TOFU 确认。
-5. token 缺失/不匹配 → 输出空。防护目标：杜绝「直接敲一行 `pcs __askpass <id>` 拿明文」。诚实边界：同 Windows 用户的进程理论上可读 ssh 子进程 env，但该用户本就在 DPAPI 信任边界内（直接跑 `pcs ssh` 也能登录）。
+5. token 缺失/不匹配/校验文件缺失或已删 → 输出空。防护目标：杜绝「直接敲一行 `pcs __askpass <id>` 拿明文」。诚实边界：同 Windows 用户的进程可读取校验文件内容，但该用户本就在 DPAPI 信任边界内（直接跑 `pcs ssh` 也能登录）。
 6. **`__askpass` 全程只读**：仅纯解析 JSON（跳过 id 回填写回与启动维护清理），避免与正在运行的父进程产生 JSON 写竞态。
 7. host key 首连：若 `force` 把 yes/no 确认也路由到 askpass，我们回空 = 拒绝，**首连会失败**（用户可见，非静默错误）。文档注明：首次连接建议先手动 `ssh` 一次接受 host key；**绝不代答 `yes`**（等于放弃 TOFU）。
 8. 密码错误时 ssh 正常报 `Permission denied` 退出/重试，pcs 只等待子进程，不干预。
 
 ### 临时密钥文件生命周期
 
-1. SSH 启动前：清理 `keys_tmp\` 残留（幂等）。
+1. 每次数据加载：清理 `keys_tmp\` 中早于保留阈值（1 小时）的残留（幂等）；新于阈值的文件视为存活会话文件跳过，避免并发 pcs 进程误删进行中会话的临时密钥与 token 校验文件。
 2. 解密 sidecar → 写 `<数据根>\keys_tmp\<随机名>`（数据根而非系统 TEMP，减少被清理工具/同步盘扫到的面）。
 3. `ssh -i <临时文件>`；`wait_spawned()` 返回后（成功/失败/中断都走）**覆写内容后删除**。
 4. 即使进程崩溃，残留窗口止于「下次使用 pcs 为止」，且文件在 ssh 退出前本就以明文形态存在于磁盘（任何 ssh 客户端无法避免）。
@@ -107,7 +107,7 @@ pcs 是单二进制，**自己充当 SSH_ASKPASS 程序**。⚠️ **版本依�
   - `pcs pin change`：验证旧 PIN → 设新 PIN。
   - `pcs pin reset --force`：忘记 PIN 用（见 §7 清单；清空范围含 groups 与 trash 快照）。
   - `pcs secret show <name> [--group]`：未设 PIN → 报错引导 `pin set`；设了 → 输入 PIN（不回显，Windows console API）→ 验证 → 解密 → 打印。错误重试 3 次后退出。展示密码与口令；**密钥内容不提供查看/导出**（YAGNI，多一个明文出口）。
-- 密码/口令录入：`add`/`edit` 经控制台不回显读入（或 TUI 对话框），立即加密存储；**永不进命令行参数、不进历史、不进日志**。
+- 密码/口令录入：`add`/`edit` 经控制台**不回显**读入（`--password-stdin` / `--key-pass-stdin`：stdin 为控制台时走 Win32 不回显读取，重定向/管道喂入走普通读行；或 TUI 对话框密码掩码字段），立即加密存储；**永不进命令行参数、不进历史、不进日志**。
 
 ## 7. 清理路径清单（硬性检查项）
 
@@ -117,8 +117,8 @@ pcs 是单二进制，**自己充当 SSH_ASKPASS 程序**。⚠️ **版本依�
 | `pcs rm <项目>`（软删） | **不删 key 文件**（快照保留引用，可恢复）；秘密字段随快照保留 |
 | `purge_expired_trash`（真删） | 删除 `keys\<id>.key`（失败 → `pendingKeyDeletes`）；秘密字段随快照消失 |
 | `edit` 更换密钥 | 旧 sidecar 原子覆盖 |
-| SSH 启动前 | 以 JSON 引用为准清理 `keys\` 无引用文件 + `keys_tmp\` 残留清理 |
-| ssh 退出后 | `wait_spawned()` 覆写并删除本次 `keys_tmp\` 临时文件 |
+| 每次数据加载（`Store::load`） | 以 JSON 引用为准清理 `keys\` 无引用文件（**仅数据非退化时**，见 §12-1）+ `keys_tmp\` 残留清理（**跳过修改时间在 1 小时内的活跃会话文件**，避免误删进行中 ssh 会话的临时密钥/token 校验文件）+ `keys\*.key.tmp` 写失败残留清理 |
+| ssh 退出后 | `wait_spawned()` 覆写并删除本次 `keys_tmp\` 临时文件与 askpass token 校验文件 |
 
 - **删除失败 → 延迟重试**：删除失败（被占用/权限）→ 相对路径加入顶层 `pendingKeyDeletes` → 照常保存 JSON，不 panic 不打断主流程，仅 flash 提示。
 - **重试**：每次进程加载数据后（`Store::load` 完成后执行一次，CLI 与 TUI 均覆盖）遍历尝试删除，成功移除。与孤儿清理合并为同一幂等函数，每次启动收敛。
@@ -152,8 +152,9 @@ pcs 是单二进制，**自己充当 SSH_ASKPASS 程序**。⚠️ **版本依�
 | 私钥 | 独立文件，DPAPI 密文；JSON 仅存相对路径 |
 | 回收站快照（trash） | 秘密字段同为 DPAPI 密文；软删保留 key 文件，purge 真删时删除 |
 | 命令行参数 | 只含 target/-p/-i/cd 命令，无秘密（弃用 plink `-pw` 的原因） |
-| 环境变量 | 仅 id + 随机 token |
-| askpass 直调 | token 校验拦截 |
+| 环境变量 | 仅 id + 随机 token + token 校验文件路径 |
+| askpass 直调 | token 与校验文件双重比对拦截（缺失/不匹配输出空） |
+| askpass token 校验文件 | 明文 token 落 `keys_tmp\`（同用户可读，DPAPI 信任边界内）；ssh 退出即覆写删除，崩溃残留由启动维护兜底 |
 | prompt 误答 | 仅 password/passphrase 类 prompt 回答，其余输出空 |
 | 日志/flash | pcs 无日志系统；约定错误消息不含秘密 |
 | `secret show` 终端明文 | 功能本身，PIN 保护 |
@@ -164,6 +165,12 @@ pcs 是单二进制，**自己充当 SSH_ASKPASS 程序**。⚠️ **版本依�
 ## 11. 实施顺序
 
 0. **Spike（先行验证）**：本机 `ssh -V` + 一次性脚本实测 `SSH_ASKPASS_REQUIRE=force` 注入是否生效；结论决定后续注入策略，spike 结果记录进本节。
+   **Spike 结果（2026-09-08 实测，v3 补录）**：
+   - `ssh -V`：`OpenSSH_for_Windows_8.6p1, LibreSSL 3.4.3`（System32 自带，2022 构建）。上游 8.4 引入 `SSH_ASKPASS_REQUIRE=force`，8.6p1 支持该值。
+   - 实测方法：`SSH_ASKPASS` 指向记录 prompt 的一次性 exe，`SSH_ASKPASS_REQUIRE=force` + `DISPLAY=:0`，连接 `git@ssh.github.com:443` 触发 host key 确认。
+   - 结论：**force 生效**——host key 的 yes/no 确认 prompt 确实路由到 askpass（prompt 全文为 `The authenticity of host ... Are you sure you want to continue connecting (yes/no/[fingerprint])?`），印证 §3.7 的设计假设；askpass 输出空 → `Host key verification failed.`（安全拒绝，未代答）。
+   - 附加发现：askpass 程序必须是可直接 CreateProcess 的 exe（`.cmd`/`.bat` 报 `CreateProcessW failed error:2`）；spawn 失败时 ssh 优雅失败，不影响 pcs 稳定性。pcs.exe 本体即为 exe，满足要求。
+   - 残留风险：本次实测环境 stdin 非 tty；「有 tty 时 force 仍走 askpass」依据上游文档（force = 始终使用 askpass）与版本判定，未在有 tty 的控制台内复测。若个别版本忽略 force，行为退化为交互输密码，功能不损坏（降级安全）。
 1. models.rs：`Project` 与 `DeletedItem` 字段 + `is_ssh_project()` + 旧数据兼容测试。
 2. secret.rs：DPAPI、PIN、sidecar、引用驱动清理 + 测试（新增 `zeroize` 依赖；`windows-sys` 加 feature）。
 3. launcher.rs：`Ssh` 变体、`ssh_args`、`spawn_ssh`、`SpawnedDirect`/`wait_spawned`、临时文件生命周期、askpass env 注入 + 测试。
@@ -174,3 +181,22 @@ pcs 是单二进制，**自己充当 SSH_ASKPASS 程序**。⚠️ **版本依�
 8. TUI：标签、对话框、PIN 查看。
 9. docs/spec.md §7 补 SSH（顺手修正该节已过时的「发起后即退出」表述仅限涉及段落）。
 10. 验证：`cargo test` → `cargo fmt --check` → `cargo clippy --all-targets -- -D warnings` → `cargo build --release`。不做真实 ssh 连接测试；单元测试必含：trash purge/restore × key 文件保留与删除、`regenerate_id` 后引用驱动清理不误删、askpass prompt 分派与 token 拒绝、`ssh_args` 端口/转义、PIN 往返与错误拒绝、删除失败 → `pendingKeyDeletes` → 再次清理收敛。
+
+## 12. 实施审查后的偏差修正（v3）
+
+对实现提交的审查发现以下问题，均已修复或显式声明：
+
+1. **孤儿 key 清理加数据退化门控（Critical）**：原实现把孤儿清理挂在每次 `Store::load`，与「损坏 JSON 兜底为空数据/备份恢复」组合会静默销毁全部密文 sidecar。修正：`Store::load` 仅在「非备份恢复且 groups/trash 至少一个非空」（引用集可信）时允许孤儿清理；`pendingKeyDeletes` 重试与 tmp 残留清理不受门控影响。设计 §7 中清理触发时机据此由「SSH 启动前」调整为「每次数据加载（受门控）」。
+2. **`__askpass` token 真实比对**：原实现只检查 token 非空，未落实 §3.5 的「不匹配 → 输出空」。修正：父进程把 token 写入 `keys_tmp\askpass-<uuid>.token` 并注入 `PCS_ASKPASS_TOKEN_FILE`，`__askpass` 比对 env token 与文件内容（64 位 hex，大小写不敏感），不一致即拒绝；ssh 退出后覆写删除（§3.5/§10 已同步更新）。
+3. **`--password-stdin` / `--key-pass-stdin` 控制台不回显**：原实现普通 `read_line` 会回显明文。修正：stdin 为控制台时走既有 `read_hidden_line`（Win32 不回显），重定向/管道喂入不受影响（§6 已同步更新）。
+4. **TUI 新增对话框补 SSH 秘密字段**：新增表单追加「私钥来源路径」「登录密码」「私钥口令」（仅 SSH 目标非空时生效），新增即可直接保存秘密，无需二次编辑（§9 原要求）。
+5. **设计 §11 必测项补齐**：新增 askpass token 拒绝测试、`regenerate_id` 后引用驱动清理不误删测试、回收站单项删除/清空对磁盘 key 文件真删测试。
+6. **顺手加固**：`keys\*.key.tmp` 写失败残留纳入启动维护清理；`verify_pin` 迭代数钳制上限（config.json 被篡改成超大值时的本机 DoS 防护，超限记录校验必败）；`Project::with_ssh_target` 移入 `models.rs`；`__askpass` 提前于 `Config::load` 执行，保证其全程只读；需要临时改写 `APPDATA` 的测试统一串行锁 + Drop 恢复。
+7. **已知低水位声明**：`unprotect` 返回的明文 `String` 及输入源字符串在内存中的残留不做 `Zeroizing` 包装（设计本就认可同用户内存低水位）；`zeroize` 覆盖加密/解密过程中的临时字节缓冲。
+
+实施审查复审后的跟进修复（v3 续）：
+
+8. **`keys_tmp\` 清理加会话保护**：启动维护无差别覆写删除 `keys_tmp\` 全部文件，ssh 会话进行中另一 pcs 进程加载数据会误删存活会话的临时密钥与 token 校验文件。修正：按修改时间跳过 1 小时内的文件（§3 生命周期与 §7 清理表已同步更新）。
+9. **无保存秘密时不注入 askpass**：原实现对无秘密项目也注入 force（`askpass_env_ok` 对空秘密返回 true），交互密码提示会被劫持为空。修正：注入前提为项目存有密码/口令密文（§3.5 已同步）。
+10. **录入提示语走 stderr**：`--password-stdin` / `--key-pass-stdin` 与 PIN 录入的提示语统一走 stderr，保持 stdout 干净供脚本管道使用。
+11. **新增表单秘密字段生效条件（声明）**：新增对话框的「私钥来源路径」「登录密码」「私钥口令」仅在 SSH 目标非空时生效；SSH 目标留空（普通项目）时这些字段被忽略，字段标签已注明「SSH 项目，可选」，不再额外报错。

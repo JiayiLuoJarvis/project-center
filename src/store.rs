@@ -54,8 +54,11 @@ impl Store {
         let (mut data, backfilled, recovered) = Self::load_from_inner(&path);
         // 超过保留期的回收站项自动清理。
         let purged = crate::ops::purge_expired_trash(&mut data);
-        // 秘密维护：pendingKeyDeletes 重试、孤儿 key 清理、keys_tmp 残留清理。
-        let maintained = crate::secret::startup_maintenance(&mut data);
+        // 数据退化（损坏且无备份、或从备份恢复）时引用集不可信，
+        // 绝不做孤儿 key 清理，否则会把全部密文 sidecar 当孤儿销毁。
+        let allow_orphan_sweep = !recovered && orphan_sweep_allowed(&data);
+        // 秘密维护：pendingKeyDeletes 重试、孤儿 key 清理、tmp 残留清理。
+        let maintained = crate::secret::startup_maintenance(&mut data, allow_orphan_sweep);
         // 回填 id / 损坏恢复 / 清理过期项后立即写回，避免只读命令丢恢复结果。
         if backfilled || recovered || purged || maintained {
             let _ = Self::save_to(&data, &path);
@@ -128,6 +131,13 @@ impl Store {
         let _ = std::fs::remove_file(p);
         std::fs::rename(&tmp, p).is_ok()
     }
+}
+
+/// 孤儿 key 清理的允许条件：groups 与 trash 快照至少一个非空（引用集可信）。
+/// 数据为空可能是「损坏兜底到空数据」或「首启文件缺失」，此时 `keys\` 下
+/// 任何文件都可能是最后一次正常数据引用的密钥，一律不清理。
+fn orphan_sweep_allowed(data: &ProjectData) -> bool {
+    !data.groups.is_empty() || !data.trash.is_empty()
 }
 
 /// 解析文本并回填缺失的项目 id（含回收站项与分组快照内项目）；
@@ -254,6 +264,43 @@ impl Store {
         let corrupt = unique_name_in(parent, &base, ".corrupt");
         if std::fs::rename(p, &corrupt).is_err() {
             eprintln!("警告：无法把损坏文件改名以保留现场。");
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_env {
+    use std::path::Path;
+    use std::sync::{Mutex, MutexGuard};
+
+    // 需要临时改写 APPDATA 的测试必须串行执行，避免进程级全局状态互踩。
+    static APPDATA_LOCK: Mutex<()> = Mutex::new(());
+
+    pub fn lock_appdata() -> MutexGuard<'static, ()> {
+        APPDATA_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// 把 APPDATA 指向临时目录；Drop 时恢复原值（断言失败也不残留）。
+    pub struct AppdataGuard {
+        saved: Option<std::ffi::OsString>,
+    }
+
+    impl AppdataGuard {
+        pub fn redirect(dir: &Path) -> Self {
+            let saved = std::env::var_os("APPDATA");
+            unsafe { std::env::set_var("APPDATA", dir) };
+            Self { saved }
+        }
+    }
+
+    impl Drop for AppdataGuard {
+        fn drop(&mut self) {
+            unsafe {
+                match self.saved.take() {
+                    Some(value) => std::env::set_var("APPDATA", value),
+                    None => std::env::remove_var("APPDATA"),
+                }
+            }
         }
     }
 }
@@ -400,6 +447,27 @@ mod tests {
         let data = Store::load_from(&path);
         assert!(data.groups.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn orphan_sweep_allowed_requires_non_empty_data() {
+        // 空数据（损坏兜底/首启缺失）不可清理
+        assert!(!orphan_sweep_allowed(&ProjectData::default()));
+        // 有分组即引用集可信（分组内项目可为空）
+        let mut data = ProjectData::default();
+        data.groups.push(Group {
+            name: "G".into(),
+            alias: String::new(),
+            projects: Vec::new(),
+        });
+        assert!(orphan_sweep_allowed(&data));
+        // 仅有回收站快照也可信
+        let mut data = ProjectData::default();
+        data.trash.push(crate::models::DeletedItem {
+            kind: "project".into(),
+            ..Default::default()
+        });
+        assert!(orphan_sweep_allowed(&data));
     }
 
     #[test]

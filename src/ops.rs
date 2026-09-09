@@ -1196,6 +1196,77 @@ mod tests {
         assert_eq!(data.trash.len(), 2);
     }
 
+    fn ssh_trash_snapshot(key: &str) -> (String, DeletedItem) {
+        let mut project = Project::new("srv", "/opt/x", "");
+        project.ssh_target = "abc@h".into();
+        project.ssh_key_file = key.into();
+        let id = project.id.clone();
+        (id, DeletedItem::from_project(&project, "Work", 1))
+    }
+
+    #[test]
+    fn restore_with_id_conflict_keeps_key_reference_for_sweep() {
+        // 设计 §11 必测：regenerate_id 后 JSON 中的 sshKeyFile 路径不变，
+        // 引用驱动清理仍能覆盖该密钥文件，不会因 id 与文件名失配而误删。
+        let mut data = ProjectData::default();
+        add_group_with_alias(&mut data, "Work", "").unwrap();
+        let (id, snapshot) = ssh_trash_snapshot("keys/srv.key");
+        data.trash.push(snapshot);
+        // 同 id 项目已存在（如删除后又手工重建）
+        let mut live = Project::new("srv-live", "/opt/live", "");
+        live.id = id.clone();
+        data.groups[0].projects.push(live);
+
+        restore_item(&mut data, &id).unwrap();
+        let restored = data
+            .groups
+            .iter()
+            .flat_map(|group| &group.projects)
+            .find(|project| project.name == "srv")
+            .unwrap();
+        assert_ne!(restored.id, id, "id 冲突应已重生成");
+        assert_eq!(restored.ssh_key_file, "keys/srv.key", "key 引用必须保留");
+        let refs = crate::secret::referenced_key_files(&data);
+        assert!(
+            refs.contains(&"keys/srv.key".to_string()),
+            "regenerate_id 后引用清理不得误删该密钥"
+        );
+    }
+
+    #[test]
+    fn empty_trash_and_delete_trash_item_remove_key_files_on_disk() {
+        // drop_key_file 走真实数据根：串行 + 临时 APPDATA，验证磁盘行为。
+        let _lock = crate::store::test_env::lock_appdata();
+        let temp_appdata =
+            std::env::temp_dir().join(format!("pcs_ops_test_{}", uuid::Uuid::new_v4()));
+        let root = temp_appdata.join("project_center_dev");
+        std::fs::create_dir_all(root.join("keys")).unwrap();
+        let _appdata = crate::store::test_env::AppdataGuard::redirect(&temp_appdata);
+
+        let (id_a, snapshot_a) = ssh_trash_snapshot("keys/a.key");
+        let (_id_b, snapshot_b) = ssh_trash_snapshot("keys/b.key");
+        std::fs::write(root.join("keys").join("a.key"), "enc-a").unwrap();
+        std::fs::write(root.join("keys").join("b.key"), "enc-b").unwrap();
+        let mut data = ProjectData::default();
+        add_group_with_alias(&mut data, "Work", "").unwrap();
+        data.trash.push(snapshot_a);
+        data.trash.push(snapshot_b);
+
+        // 单项彻底删除：磁盘文件真删，无 pending 残留
+        let removed = delete_trash_item(&mut data, &id_a).unwrap();
+        assert_eq!(removed.name, "srv");
+        assert!(!root.join("keys").join("a.key").exists());
+        assert!(data.pending_key_deletes.is_empty());
+        assert!(root.join("keys").join("b.key").exists());
+
+        // 清空回收站：剩余 key 文件也真删
+        empty_trash(&mut data);
+        assert!(!root.join("keys").join("b.key").exists());
+        assert!(data.pending_key_deletes.is_empty());
+
+        let _ = std::fs::remove_dir_all(&temp_appdata);
+    }
+
     #[test]
     fn soft_delete_keeps_key_reference_and_purge_defers_failed_deletes() {
         let mut data = trash_data();
