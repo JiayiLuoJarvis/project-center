@@ -59,3 +59,7 @@ pcs secret show <项目>             # 查看保存的 SSH 秘密
 ## 详细规格
 
 参见 [`docs/spec.md`](docs/spec.md)（功能参考；以代码为准）。
+
+## 许可证
+
+本项目采用 [MIT License](LICENSE) 开源，Copyright (c) 2026 JiayiLuoJarvis。
