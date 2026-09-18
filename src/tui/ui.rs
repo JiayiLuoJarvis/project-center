@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 
 use crate::domain::models::ProjectData;
 use crate::persist::AppConfig;
-use crate::tui::app::{App, Focus, FormField, Mode, RightPane, SETTINGS_ITEMS};
+use crate::tui::app::{App, Focus, FormField, Mode, RightPane, SETTINGS_ITEMS, format_list_index};
 use crate::tui::theme;
 use crate::tui::widgets;
 
@@ -124,9 +124,15 @@ fn render_left(frame: &mut Frame, area: Rect, app: &App, data: &ProjectData) {
             crate::tui::app::LeftItem::Group(gi) => {
                 let g = &data.groups[gi];
                 let label = if g.alias.trim().is_empty() {
-                    format!("{}  {}", g.name, g.projects.len())
+                    format!("{} {}  {}", format_list_index(gi), g.name, g.projects.len())
                 } else {
-                    format!("{} [{}]  {}", g.name, g.alias, g.projects.len())
+                    format!(
+                        "{} {} [{}]  {}",
+                        format_list_index(gi),
+                        g.name,
+                        g.alias,
+                        g.projects.len()
+                    )
                 };
                 items.push(widgets::simple_item(label));
             }
@@ -193,7 +199,7 @@ fn right_content<'a>(
                     .into_iter()
                     .map(|i| {
                         let p = &data.groups[gi].projects[i];
-                        widgets::project_item(p, config, data.connection_of(p).ok())
+                        widgets::project_item(i, p, config, data.connection_of(p).ok())
                     })
                     .collect();
                 (format!("PROJECTS · {name}"), items)

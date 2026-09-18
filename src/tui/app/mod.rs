@@ -15,6 +15,7 @@ mod launch;
 mod secret_viewer;
 mod state;
 
+pub(crate) use filter::{format_list_index, matches_list_index};
 pub(crate) use state::*;
 
 impl App {
@@ -70,11 +71,13 @@ impl App {
         data.groups
             .iter()
             .enumerate()
-            .filter(|(_, g)| {
+            .filter(|(i, g)| {
                 if self.focus != Focus::Groups || self.filter.is_empty() {
                     return true;
                 }
-                self.matches_filter(&g.name) || self.matches_filter(&g.alias)
+                self.matches_filter(&g.name)
+                    || self.matches_filter(&g.alias)
+                    || matches_list_index(&self.filter, *i)
             })
             .map(|(i, _)| LeftItem::Group(i))
             .collect()

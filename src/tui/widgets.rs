@@ -5,22 +5,27 @@ use ratatui::widgets::ListItem;
 use crate::domain::models::{Connection, DeletedItem, Project};
 use crate::persist::AppConfig;
 use crate::tui::actions;
+use crate::tui::app::format_list_index;
 use crate::tui::theme;
 
 pub fn project_item(
+    index: usize,
     project: &Project,
     config: &AppConfig,
     connection: Option<&Connection>,
 ) -> ListItem<'static> {
     if project.is_ssh_project() {
-        return ssh_project_item(project, connection);
+        return ssh_project_item(index, project, connection);
     }
     let path = if project.has_windows_path() {
         project.path.clone()
     } else {
         project.linux_path()
     };
-    let mut name_spans = vec![Span::styled(project.name.clone(), theme::base())];
+    let mut name_spans = vec![
+        Span::styled(format!("{} ", format_list_index(index)), theme::base()),
+        Span::styled(project.name.clone(), theme::base()),
+    ];
     if !project.alias.trim().is_empty() {
         name_spans.push(Span::raw(" "));
         name_spans.push(Span::styled(
@@ -52,8 +57,15 @@ pub fn project_item(
 }
 
 /// SSH 远程项目行：黄色 `SSH` 标签 + 远程路径。
-fn ssh_project_item(project: &Project, connection: Option<&Connection>) -> ListItem<'static> {
-    let mut name_spans = vec![Span::styled(project.name.clone(), theme::base())];
+fn ssh_project_item(
+    index: usize,
+    project: &Project,
+    connection: Option<&Connection>,
+) -> ListItem<'static> {
+    let mut name_spans = vec![
+        Span::styled(format!("{} ", format_list_index(index)), theme::base()),
+        Span::styled(project.name.clone(), theme::base()),
+    ];
     if !project.alias.trim().is_empty() {
         name_spans.push(Span::raw(" "));
         name_spans.push(Span::styled(

@@ -36,7 +36,7 @@ impl App {
                 g.projects
                     .iter()
                     .enumerate()
-                    .filter(|(_, p)| {
+                    .filter(|(i, p)| {
                         if self.focus != Focus::Projects || self.filter.is_empty() {
                             return true;
                         }
@@ -48,6 +48,7 @@ impl App {
                                 && p.id
                                     .get(..self.filter.len())
                                     .is_some_and(|prefix| self.matches_filter(prefix)))
+                            || matches_list_index(&self.filter, *i)
                     })
                     .map(|(i, _)| i)
                     .collect()

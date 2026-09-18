@@ -967,3 +967,70 @@ fn edit_ssh_project_keeps_connection_on_save() {
 
     let _ = std::fs::remove_dir_all(&temp_appdata);
 }
+
+#[test]
+fn format_list_index_pads_then_grows() {
+    assert_eq!(format_list_index(0), "01");
+    assert_eq!(format_list_index(8), "09");
+    assert_eq!(format_list_index(99), "100");
+}
+
+#[test]
+fn filter_digit_hits_group_store_index() {
+    let data = sample();
+    let mut app = App::new(&data);
+    app.focus = Focus::Groups;
+
+    app.filter = "1".into();
+    assert_eq!(app.filtered_group_indices(&data), vec![0]);
+    assert_eq!(app.left_items(&data), vec![LeftItem::Group(0)]);
+
+    app.filter = "01".into();
+    assert_eq!(app.filtered_group_indices(&data), vec![0]);
+
+    app.filter = "2".into();
+    assert_eq!(app.filtered_group_indices(&data), vec![1]);
+    assert_eq!(app.left_items(&data), vec![LeftItem::Group(1)]);
+}
+
+#[test]
+fn filter_digit_hits_project_store_index() {
+    let mut data = sample();
+    data.groups[0].projects = vec![
+        Project::new("alpha", r"E:\a", ""),
+        Project::new("beta", r"E:\b", ""),
+    ];
+    let mut app = App::new(&data);
+    app.focus = Focus::Projects;
+    app.left_sel = 0;
+
+    app.filter = "1".into();
+    assert_eq!(app.filtered_project_indices(&data, 0), vec![0]);
+
+    app.filter = "01".into();
+    assert_eq!(app.filtered_project_indices(&data, 0), vec![0]);
+
+    app.filter = "2".into();
+    assert_eq!(app.filtered_project_indices(&data, 0), vec![1]);
+}
+
+#[test]
+fn filter_alias_wk_does_not_take_index_branch() {
+    let mut data = sample();
+    data.groups[0].alias = "wk".into();
+    data.groups[0].projects = vec![
+        Project::new("alpha", r"E:\a", "").with_alias("wk"),
+        Project::new("beta", r"E:\b", ""),
+    ];
+    let mut app = App::new(&data);
+
+    app.focus = Focus::Groups;
+    app.filter = "wk".into();
+    assert_eq!(app.filtered_group_indices(&data), vec![0]);
+    assert_eq!(app.left_items(&data), vec![LeftItem::Group(0)]);
+
+    app.focus = Focus::Projects;
+    app.left_sel = 0;
+    app.filter = "wk".into();
+    assert_eq!(app.filtered_project_indices(&data, 0), vec![0]);
+}
