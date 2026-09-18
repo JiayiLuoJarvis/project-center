@@ -6,8 +6,12 @@ mod theme;
 mod ui;
 mod widgets;
 
+use std::io::stdout;
+
 use anyhow::Result;
+use ratatui::crossterm::cursor::Show;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::execute;
 
 use crate::domain::models::{Project, ProjectData};
 use crate::launch as launcher;
@@ -31,10 +35,18 @@ pub fn choose_launch(
     )
 }
 
+/// 离开备用屏后显式显示光标。
+/// `ratatui::restore` 只关 raw / 退备用屏；TUI draw 会 hide 光标，
+/// PowerShell 等控制台子进程会继承隐藏状态（WSL/bash 常自行复位）。
+fn restore_terminal() {
+    ratatui::restore();
+    let _ = execute!(stdout(), Show);
+}
+
 fn run_with(data: &mut ProjectData, config: &mut AppConfig, mut app: App) -> Result<()> {
     let mut terminal = ratatui::try_init()?;
     let result = loop_ui(&mut terminal, data, config, &mut app);
-    ratatui::restore();
+    restore_terminal();
     result
 }
 
@@ -64,7 +76,7 @@ fn loop_ui(
                 option,
                 exit_after,
             } => {
-                ratatui::restore();
+                restore_terminal();
                 let launch_result = do_launch(data, &project, &group, &option);
                 if exit_after || app.short_session {
                     return launch_result.map(|_| ());
@@ -82,7 +94,7 @@ fn loop_ui(
                 app.mode = Mode::Browse;
             }
             Outcome::PickFolder { target } => {
-                ratatui::restore();
+                restore_terminal();
                 let path = rfd::FileDialog::new()
                     .pick_folder()
                     .map(|p| p.to_string_lossy().trim().to_string());
@@ -90,7 +102,7 @@ fn loop_ui(
                 *terminal = ratatui::try_init()?;
             }
             Outcome::PickFile { target } => {
-                ratatui::restore();
+                restore_terminal();
                 let path = rfd::FileDialog::new()
                     .add_filter("所有文件", &["*"])
                     .add_filter("私钥文件 (*.pem, *.key, *.ppk)", &["pem", "key", "ppk"])
