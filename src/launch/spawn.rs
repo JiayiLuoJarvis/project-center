@@ -666,7 +666,7 @@ mod tests {
 
     #[test]
     fn spawn_direct_ssh_requires_connection_id() {
-        let p = Project::new("srv", "/opt/x", "").with_ssh_target("abc@h");
+        let p = Project::new("srv", "/opt/x", "");
         let Err(err) = spawn_direct(&ProjectData::default(), &p, "G", LaunchEnv::Ssh, "") else {
             panic!("expected NotSshProject");
         };

@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 
 use super::{Error, Result};
@@ -79,9 +77,7 @@ impl ProjectData {
             .collect();
         match matches.as_slice() {
             [index] => Ok(*index),
-            [] => Err(Error::ConnectionNotFound {
-                name: selector.to_string(),
-            }),
+            [] => find_connection_by_id(self, selector),
             _ => Err(Error::ConnectionAmbiguous {
                 name: selector.to_string(),
             }),
@@ -155,13 +151,7 @@ impl ProjectData {
 
     /// 同校验（唯一性排除自身）；`KeyChange::Clear` 同时清空 key_pass_enc。
     pub fn edit_connection(&mut self, id: &str, patch: ConnectionPatch, now: &str) -> Result<()> {
-        let idx = self
-            .connections
-            .iter()
-            .position(|conn| conn.id.eq_ignore_ascii_case(id.trim()))
-            .ok_or_else(|| Error::ConnectionNotFound {
-                name: id.to_string(),
-            })?;
+        let idx = self.find_connection(id)?;
         let current = &self.connections[idx];
         let name = patch.name.as_deref().unwrap_or(&current.name).to_string();
         let user = patch.user.as_deref().unwrap_or(&current.user).to_string();
@@ -207,13 +197,7 @@ impl ProjectData {
 
     /// 有引用 → Err(ConnectionInUse)；成功则摘除连接，sidecar 由调用方退役。
     pub fn remove_connection(&mut self, id: &str) -> Result<Connection> {
-        let idx = self
-            .connections
-            .iter()
-            .position(|conn| conn.id.eq_ignore_ascii_case(id.trim()))
-            .ok_or_else(|| Error::ConnectionNotFound {
-                name: id.to_string(),
-            })?;
+        let idx = self.find_connection(id)?;
         let refs = self.connection_refs(&self.connections[idx].id);
         if refs > 0 {
             return Err(Error::ConnectionInUse {
@@ -531,22 +515,6 @@ fn queue_pending_key(data: &mut ProjectData, path: String) {
     data.pending_key_deletes.push(path.to_string());
 }
 
-fn clear_project_legacy_ssh(project: &mut Project) {
-    project.ssh_target.clear();
-    project.ssh_key_file.clear();
-    project.ssh_key_path.clear();
-    project.ssh_password_enc.clear();
-    project.ssh_key_pass_enc.clear();
-}
-
-fn clear_deleted_legacy_ssh(item: &mut DeletedItem) {
-    item.ssh_target.clear();
-    item.ssh_key_file.clear();
-    item.ssh_key_path.clear();
-    item.ssh_password_enc.clear();
-    item.ssh_key_pass_enc.clear();
-}
-
 fn attach_legacy(data: &mut ProjectData, locus: &Locus, connection_id: &str) {
     match locus {
         Locus::Live { gi, pi } => {
@@ -556,13 +524,11 @@ fn attach_legacy(data: &mut ProjectData, locus: &Locus, connection_id: &str) {
                 .and_then(|group| group.projects.get_mut(*pi))
             {
                 project.connection_id = connection_id.to_string();
-                clear_project_legacy_ssh(project);
             }
         }
         Locus::Trashed { ti } => {
             if let Some(item) = data.trash.get_mut(*ti) {
                 item.connection_id = connection_id.to_string();
-                clear_deleted_legacy_ssh(item);
             }
         }
         Locus::TrashedInGroup { ti, pi } => {
@@ -572,7 +538,6 @@ fn attach_legacy(data: &mut ProjectData, locus: &Locus, connection_id: &str) {
                 .and_then(|item| item.projects.get_mut(*pi))
             {
                 project.connection_id = connection_id.to_string();
-                clear_project_legacy_ssh(project);
             }
         }
     }
@@ -690,8 +655,8 @@ mod tests {
                 name: "G".into(),
                 alias: String::new(),
                 projects: vec![
-                    Project::new("one", "/opt/a", "").with_ssh_target("abc@h:22"),
-                    Project::new("two", "/opt/b", "").with_ssh_target("ABC@H"),
+                    Project::new("one", "/opt/a", ""),
+                    Project::new("two", "/opt/b", ""),
                 ],
             }],
             ..Default::default()
@@ -705,8 +670,6 @@ mod tests {
         let cid = data.connections[0].id.clone();
         assert_eq!(data.groups[0].projects[0].connection_id, cid);
         assert_eq!(data.groups[0].projects[1].connection_id, cid);
-        assert!(data.groups[0].projects[0].ssh_target.is_empty());
-        assert!(data.groups[0].projects[1].ssh_target.is_empty());
         assert_eq!(data.connections[0].name, "h");
     }
 
@@ -717,17 +680,8 @@ mod tests {
                 name: "G".into(),
                 alias: String::new(),
                 projects: vec![
-                    {
-                        let mut p = Project::new("one", "/opt/a", "").with_ssh_target("abc@h");
-                        p.ssh_key_file = "keys/old.key".into();
-                        p.ssh_password_enc = "PW1".into();
-                        p
-                    },
-                    {
-                        let mut p = Project::new("two", "/opt/b", "").with_ssh_target("abc@h:22");
-                        p.ssh_password_enc = "PW2".into();
-                        p
-                    },
+                    Project::new("one", "/opt/a", ""),
+                    Project::new("two", "/opt/b", ""),
                 ],
             }],
             ..Default::default()
@@ -803,9 +757,9 @@ mod tests {
 
     #[test]
     fn absorb_legacy_attaches_trash_loci() {
-        let live = Project::new("live", "/opt/a", "").with_ssh_target("abc@h");
-        let gone = Project::new("gone", "/opt/b", "").with_ssh_target("abc@h");
-        let inner = Project::new("inner", "/opt/c", "").with_ssh_target("abc@h");
+        let live = Project::new("live", "/opt/a", "");
+        let gone = Project::new("gone", "/opt/b", "");
+        let inner = Project::new("inner", "/opt/c", "");
         let mut data = ProjectData {
             groups: vec![Group {
                 name: "G".into(),
@@ -852,8 +806,6 @@ mod tests {
         assert_eq!(data.groups[0].projects[0].connection_id, cid);
         assert_eq!(data.trash[0].connection_id, cid);
         assert_eq!(data.trash[1].projects[0].connection_id, cid);
-        assert!(data.trash[0].ssh_target.is_empty());
-        assert!(data.trash[1].projects[0].ssh_target.is_empty());
     }
 
     #[test]
@@ -887,11 +839,7 @@ mod tests {
             groups: vec![Group {
                 name: "G".into(),
                 alias: String::new(),
-                projects: vec![{
-                    let mut p = Project::new("one", "/opt/a", "").with_ssh_target("abc@h");
-                    p.ssh_key_file = "keys/old-project.key".into();
-                    p
-                }],
+                projects: vec![Project::new("one", "/opt/a", "")],
             }],
             ..Default::default()
         };

@@ -369,31 +369,13 @@ pub fn shred_and_remove(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
-/// 收集 `data` 引用的全部 key 文件相对路径（连接 + 项目 / 回收站遗留字段）。
-/// 项目级字段在后续删除前仍并入，避免迁移窗口误删 sidecar。
+/// 收集 `data` 引用的全部 key 文件相对路径（只认连接；项目 / 回收站不再持有密钥）。
 pub fn referenced_key_files(data: &ProjectData) -> Vec<String> {
-    let mut refs = Vec::new();
-    for conn in &data.connections {
-        if !conn.ssh_key_file.trim().is_empty() {
-            refs.push(conn.ssh_key_file.clone());
-        }
-    }
-    for project in data.groups.iter().flat_map(|g| &g.projects) {
-        if !project.ssh_key_file.trim().is_empty() {
-            refs.push(project.ssh_key_file.clone());
-        }
-    }
-    for item in &data.trash {
-        if !item.ssh_key_file.trim().is_empty() {
-            refs.push(item.ssh_key_file.clone());
-        }
-        for project in &item.projects {
-            if !project.ssh_key_file.trim().is_empty() {
-                refs.push(project.ssh_key_file.clone());
-            }
-        }
-    }
-    refs
+    data.connections
+        .iter()
+        .filter(|conn| !conn.ssh_key_file.trim().is_empty())
+        .map(|conn| conn.ssh_key_file.clone())
+        .collect()
 }
 
 /// 收集 `keys\` 目录下的全部 key 相对路径。
@@ -498,7 +480,7 @@ pub fn startup_maintenance(data: &mut ProjectData, allow_orphan_sweep: bool) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::{DeletedItem, Group, Project, ProjectData};
+    use crate::domain::models::{Connection, DeletedItem, Group, Project, ProjectData};
 
     fn temp_root() -> PathBuf {
         let stamp = std::time::SystemTime::now()
@@ -510,11 +492,14 @@ mod tests {
         dir
     }
 
-    fn ssh_project(relative: &str) -> Project {
-        let mut p = Project::new("srv", "/opt/x", "");
-        p.ssh_target = "abc@h".into();
-        p.ssh_key_file = relative.into();
-        p
+    fn ssh_connection(id: &str, relative: &str) -> Connection {
+        Connection {
+            id: id.into(),
+            name: id.into(),
+            host: "h".into(),
+            ssh_key_file: relative.into(),
+            ..Connection::default()
+        }
     }
 
     #[test]
@@ -598,42 +583,21 @@ mod tests {
     }
 
     #[test]
-    fn referenced_key_files_covers_groups_and_trash() {
+    fn referenced_key_files_is_connections_only() {
         let mut data = ProjectData::default();
         data.groups.push(Group {
             name: "G".into(),
             alias: String::new(),
-            projects: vec![ssh_project("keys/a.key")],
+            projects: vec![Project::new("srv", "/opt/x", "").with_connection("c1")],
         });
-        let mut trashed = ssh_project("keys/b.key");
-        trashed.ssh_key_file = String::new();
-        let mut item = DeletedItem::from_project(&trashed, "G", 1);
-        item.ssh_key_file = "keys/c.key".into();
-        let mut group_item = DeletedItem::from_group(&Group::new("H"), 2);
-        group_item.projects.push(ssh_project("keys/d.key"));
-        data.trash.push(item);
-        data.trash.push(group_item);
+        let trashed = Project::new("gone", "/opt/y", "").with_connection("c2");
+        data.trash.push(DeletedItem::from_project(&trashed, "G", 1));
+        data.connections.push(ssh_connection("c1", "keys/a.key"));
+        data.connections.push(ssh_connection("c2", "keys/c.key"));
         let refs = referenced_key_files(&data);
+        assert_eq!(refs.len(), 2);
         assert!(refs.contains(&"keys/a.key".to_string()));
         assert!(refs.contains(&"keys/c.key".to_string()));
-        assert!(refs.contains(&"keys/d.key".to_string()));
-        assert!(!refs.contains(&"keys/b.key".to_string()));
-    }
-
-    #[test]
-    fn referenced_key_files_includes_connection_keys() {
-        let mut data = ProjectData::default();
-        data.groups.push(Group {
-            name: "G".into(),
-            alias: String::new(),
-            projects: vec![ssh_project("keys/legacy.key")],
-        });
-        let mut conn = crate::domain::models::Connection::default();
-        conn.ssh_key_file = "keys/conn.key".into();
-        data.connections.push(conn);
-        let refs = referenced_key_files(&data);
-        assert!(refs.contains(&"keys/conn.key".to_string()));
-        assert!(refs.contains(&"keys/legacy.key".to_string()));
     }
 
     #[cfg(windows)]
@@ -641,11 +605,7 @@ mod tests {
     fn startup_maintenance_pends_orphans_and_tmp() {
         let root = temp_root();
         let mut data = ProjectData::default();
-        data.groups.push(Group {
-            name: "G".into(),
-            alias: String::new(),
-            projects: vec![ssh_project("keys/keep.key")],
-        });
+        data.connections.push(ssh_connection("c1", "keys/keep.key"));
         std::fs::create_dir_all(root.join("keys")).unwrap();
         std::fs::create_dir_all(root.join("keys_tmp")).unwrap();
         std::fs::write(root.join("keys").join("keep.key"), "enc").unwrap();
@@ -733,10 +693,11 @@ mod tests {
     fn orphan_sweep_gating_covers_trash_references() {
         let root = temp_root();
         let mut data = ProjectData::default();
-        // groups 为空但 trash 快照引用 key：清理仍应安全（引用可信）
-        let mut trashed = ssh_project("keys/in-trash.key");
-        trashed.ssh_key_file = "keys/in-trash.key".into();
+        // trash 项目只引用连接；密钥在连接上，清理不得删连接 key
+        let trashed = Project::new("gone", "/opt/x", "").with_connection("c1");
         data.trash.push(DeletedItem::from_project(&trashed, "G", 1));
+        data.connections
+            .push(ssh_connection("c1", "keys/in-trash.key"));
         std::fs::create_dir_all(root.join("keys")).unwrap();
         std::fs::write(root.join("keys").join("in-trash.key"), "enc").unwrap();
         std::fs::write(root.join("keys").join("orphan.key"), "enc").unwrap();

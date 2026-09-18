@@ -13,13 +13,6 @@ pub(crate) fn drop_key_file(data: &mut ProjectData, relative: &str) {
     }
 }
 
-/// 彻底移除一个回收站项引用的全部密钥文件（项自身 + 分组快照内项目）。
-fn drop_item_key_files(data: &mut ProjectData, item: &DeletedItem) {
-    drop_key_file(data, &item.ssh_key_file);
-    for project in &item.projects {
-        drop_key_file(data, &project.ssh_key_file);
-    }
-}
 /// 恢复回收站中的指定项；返回面向用户的提示信息（含恢复去向）。
 pub fn restore_item(data: &mut ProjectData, id: &str) -> Result<String> {
     let index = find_deleted_by_id(data, id)?;
@@ -84,11 +77,6 @@ fn restore_project(data: &mut ProjectData, item: DeletedItem) -> Result<String> 
         default_tool: item.default_tool.clone(),
         commands: item.commands.clone(),
         connection_id: item.connection_id.clone(),
-        ssh_target: item.ssh_target.clone(),
-        ssh_key_file: item.ssh_key_file.clone(),
-        ssh_key_path: item.ssh_key_path.clone(),
-        ssh_password_enc: item.ssh_password_enc.clone(),
-        ssh_key_pass_enc: item.ssh_key_pass_enc.clone(),
     };
     project.ensure_id();
     // id 已被现有项目占用时重新生成
@@ -188,7 +176,6 @@ fn restore_group(data: &mut ProjectData, item: DeletedItem) -> Result<String> {
 pub fn delete_trash_item(data: &mut ProjectData, id: &str) -> Result<DeletedItem> {
     let index = find_deleted_by_id(data, id)?;
     let item = data.trash.remove(index);
-    drop_item_key_files(data, &item);
     Ok(item)
 }
 
@@ -203,17 +190,11 @@ pub fn purge_expired_trash(data: &mut ProjectData) -> bool {
         .trash
         .drain(..)
         .partition(|item| item.deleted_at > 0 && item.deleted_at < cutoff);
-    for item in &expired {
-        drop_item_key_files(data, item);
-    }
     data.trash = kept;
     !expired.is_empty()
 }
 
-/// 清空回收站（连同各项目引用的密钥文件）。
+/// 清空回收站。密钥属于连接，不随回收站项删除。
 pub fn empty_trash(data: &mut ProjectData) {
-    let items: Vec<DeletedItem> = std::mem::take(&mut data.trash);
-    for item in &items {
-        drop_item_key_files(data, item);
-    }
+    data.trash.clear();
 }

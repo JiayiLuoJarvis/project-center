@@ -28,12 +28,7 @@ pub(crate) fn cmd_secret(command: SecretCommand) -> Result<()> {
     let (group_index, project_index) =
         select_project(&data, &selector.name, selector.group.as_deref())?;
     let project = &data.groups[group_index].projects[project_index];
-    if !project.is_ssh_project() {
-        bail!("项目 `{}` 不是 SSH 项目", project.name);
-    }
-    if project.ssh_password_enc.is_empty() && project.ssh_key_pass_enc.is_empty() {
-        bail!("项目 `{}` 未保存密码或私钥口令", project.name);
-    }
+    let connection = connection_for_secret_show(&data, project)?;
     let config = Config::load();
     let Some(record) = &config.pin else {
         bail!("尚未设置 PIN，先 `pcs pin set`");
@@ -53,19 +48,33 @@ pub(crate) fn cmd_secret(command: SecretCommand) -> Result<()> {
         bail!("PIN 验证失败");
     }
     println!("项目: {}", project.name);
-    if !project.ssh_password_enc.is_empty() {
-        match secret::unprotect(&project.ssh_password_enc) {
+    println!("连接: {}", connection.name);
+    if !connection.ssh_password_enc.is_empty() {
+        match secret::unprotect(&connection.ssh_password_enc) {
             Ok(pw) => println!("登录密码: {pw}"),
             Err(e) => println!("登录密码: <解密失败: {e}>"),
         }
     }
-    if !project.ssh_key_pass_enc.is_empty() {
-        match secret::unprotect(&project.ssh_key_pass_enc) {
+    if !connection.ssh_key_pass_enc.is_empty() {
+        match secret::unprotect(&connection.ssh_key_pass_enc) {
             Ok(kp) => println!("私钥口令: {kp}"),
             Err(e) => println!("私钥口令: <解密失败: {e}>"),
         }
     }
     Ok(())
+}
+
+fn connection_for_secret_show<'a>(
+    data: &'a crate::domain::models::ProjectData,
+    project: &crate::domain::models::Project,
+) -> Result<&'a crate::domain::models::Connection> {
+    let connection = data
+        .connection_of(project)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if !connection.has_saved_secrets() {
+        bail!("项目 `{}` 未保存密码或私钥口令", project.name);
+    }
+    Ok(connection)
 }
 
 /// askpass prompt 分派：只回答密码与私钥口令，其余（host key yes/no 等）忽略。
@@ -234,11 +243,13 @@ mod tests {
 
     #[test]
     fn askpass_secret_looks_up_connection_id() {
-        let mut conn = crate::domain::models::Connection::default();
-        conn.id = "CID-1".into();
-        conn.host = "h".into();
-        conn.ssh_password_enc = "PW".into();
-        conn.ssh_key_pass_enc = "KP".into();
+        let conn = crate::domain::models::Connection {
+            id: "CID-1".into(),
+            host: "h".into(),
+            ssh_password_enc: "PW".into(),
+            ssh_key_pass_enc: "KP".into(),
+            ..crate::domain::models::Connection::default()
+        };
         let data = crate::domain::models::ProjectData {
             connections: vec![conn],
             ..Default::default()
@@ -257,5 +268,44 @@ mod tests {
             None
         );
         assert_eq!(askpass_secret(&data, "", AskpassKind::Password), None);
+    }
+
+    #[test]
+    fn secret_show_resolves_via_connection() {
+        let conn = crate::domain::models::Connection {
+            id: "c1".into(),
+            name: "box".into(),
+            host: "h".into(),
+            ssh_password_enc: "PW".into(),
+            ..crate::domain::models::Connection::default()
+        };
+        let project =
+            crate::domain::models::Project::new("srv", "/opt/x", "").with_connection("c1");
+        let data = crate::domain::models::ProjectData {
+            connections: vec![conn],
+            ..Default::default()
+        };
+        let found = connection_for_secret_show(&data, &project).unwrap();
+        assert_eq!(found.name, "box");
+        assert_eq!(found.ssh_password_enc, "PW");
+
+        let local = crate::domain::models::Project::new("app", r"E:\app", "");
+        assert!(connection_for_secret_show(&data, &local).is_err());
+
+        let dangling =
+            crate::domain::models::Project::new("gone", "/opt/y", "").with_connection("missing");
+        assert!(connection_for_secret_show(&data, &dangling).is_err());
+
+        let empty = crate::domain::models::Connection {
+            id: "c2".into(),
+            host: "h2".into(),
+            ..crate::domain::models::Connection::default()
+        };
+        let bare = crate::domain::models::Project::new("bare", "/opt/z", "").with_connection("c2");
+        let data = crate::domain::models::ProjectData {
+            connections: vec![empty],
+            ..Default::default()
+        };
+        assert!(connection_for_secret_show(&data, &bare).is_err());
     }
 }

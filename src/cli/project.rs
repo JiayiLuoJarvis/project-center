@@ -326,7 +326,7 @@ mod tests {
         ops::add_project(&mut data, "Work", project).unwrap();
         let p = &data.groups[0].projects[0];
         assert_eq!(p.connection_id, cid);
-        assert!(p.ssh_target.is_empty());
+        assert!(p.is_ssh_project());
         assert_eq!(data.connections.len(), 1);
         let again = data.find_or_create_connection(&endpoint, "2026-09-18T00:00:00Z");
         assert_eq!(again, cid);

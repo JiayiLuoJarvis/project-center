@@ -12,8 +12,8 @@ impl App {
     pub fn filtered_group_indices(&self, data: &ProjectData) -> Vec<usize> {
         self.left_items(data)
             .into_iter()
-            .filter_map(|item| match item {
-                LeftItem::Group(i) => Some(i),
+            .map(|item| match item {
+                LeftItem::Group(i) => i,
             })
             .collect()
     }

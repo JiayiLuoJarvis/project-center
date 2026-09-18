@@ -21,22 +21,6 @@ pub struct Project {
     /// 引用的远程连接；非空即 SSH 项目（启动前再校验连接存在）。
     #[serde(rename = "connectionId", default)]
     pub connection_id: String,
-    /// SSH 目标（如 `user@host` 或 `user@host:2222`）；非空即 SSH 远程项目。
-    #[serde(rename = "sshTarget", default)]
-    pub ssh_target: String,
-    /// 私钥 sidecar 文件的相对路径（相对数据根，如 `keys/<uuid>.key`）；
-    /// 非空且文件存在即有密钥。空表示未导入密钥。
-    #[serde(rename = "sshKeyFile", default)]
-    pub ssh_key_file: String,
-    /// 私钥导入来源路径，仅显示用，明文无秘密。
-    #[serde(rename = "sshKeyPath", default)]
-    pub ssh_key_path: String,
-    /// 登录密码 DPAPI 密文（base64）；空表示未保存。
-    #[serde(rename = "sshPasswordEnc", default)]
-    pub ssh_password_enc: String,
-    /// 私钥口令 DPAPI 密文（base64）；空表示未保存。
-    #[serde(rename = "sshKeyPassEnc", default)]
-    pub ssh_key_pass_enc: String,
 }
 
 impl Project {
@@ -54,32 +38,19 @@ impl Project {
             default_tool: String::new(),
             commands: Vec::new(),
             connection_id: String::new(),
-            ssh_target: String::new(),
-            ssh_key_file: String::new(),
-            ssh_key_path: String::new(),
-            ssh_password_enc: String::new(),
-            ssh_key_pass_enc: String::new(),
         }
     }
 
-    /// 是否 SSH 远程项目：遗留 `sshTarget` 或 `connectionId` 任一非空即判定。
+    /// 是否 SSH 远程项目：`connectionId` 非空即判定（启动前再校验连接存在）。
     pub fn is_ssh_project(&self) -> bool {
-        !self.ssh_target.trim().is_empty() || !self.connection_id.trim().is_empty()
+        !self.connection_id.trim().is_empty()
     }
 
-    /// 把项目切换为 SSH 项目（add 入口使用）。
-    pub fn with_ssh_target(mut self, target: impl Into<String>) -> Self {
-        self.ssh_target = target.into();
-        self
-    }
-
-    #[allow(dead_code)]
     pub fn with_connection(mut self, id: impl Into<String>) -> Self {
         self.connection_id = id.into();
         self
     }
 
-    #[allow(dead_code)]
     pub fn connection_id_opt(&self) -> Option<&str> {
         let id = self.connection_id.trim();
         if id.is_empty() { None } else { Some(id) }
@@ -202,7 +173,6 @@ fn default_ssh_port() -> u16 {
     22
 }
 
-#[allow(dead_code)]
 impl Default for Connection {
     fn default() -> Self {
         Self {
@@ -220,7 +190,6 @@ impl Default for Connection {
     }
 }
 
-#[allow(dead_code)]
 impl Connection {
     pub fn new(name: impl Into<String>, endpoint: &Endpoint, now: &str) -> Self {
         Self {
@@ -269,7 +238,6 @@ impl Connection {
 }
 
 /// 规范化的 SSH 端点：迁移合并键与 `--ssh` 复用键都由它决定。
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
     pub user: String,
@@ -277,7 +245,6 @@ pub struct Endpoint {
     pub port: u16,
 }
 
-#[allow(dead_code)]
 impl Endpoint {
     /// `[user@]host[:port]`；host 含 `:`（IPv6）或含 `@`、端口非数字 → Err。
     pub fn parse(target: &str) -> super::Result<Endpoint> {
@@ -336,7 +303,6 @@ impl Endpoint {
 
 /// 拆出主机与可选端口：`host:port` -> `(host, Some(port))`。
 /// 仅当 host 部分不含 `:` 且末段为纯数字时视为端口；IPv6 目标不拆。
-#[allow(dead_code)]
 pub(crate) fn split_host_port(rest: &str) -> (&str, Option<&str>) {
     match rest.rfind(':') {
         Some(pos) => {
@@ -396,21 +362,6 @@ pub struct DeletedItem {
     pub commands: Vec<ProjectCommand>,
     #[serde(rename = "connectionId", default)]
     pub connection_id: String,
-    /// SSH 目标快照。
-    #[serde(rename = "sshTarget", default)]
-    pub ssh_target: String,
-    /// 私钥 sidecar 相对路径快照。
-    #[serde(rename = "sshKeyFile", default)]
-    pub ssh_key_file: String,
-    /// 私钥来源路径快照。
-    #[serde(rename = "sshKeyPath", default)]
-    pub ssh_key_path: String,
-    /// 登录密码密文快照。
-    #[serde(rename = "sshPasswordEnc", default)]
-    pub ssh_password_enc: String,
-    /// 私钥口令密文快照。
-    #[serde(rename = "sshKeyPassEnc", default)]
-    pub ssh_key_pass_enc: String,
     /// 分组项的完整项目数组。
     #[serde(default)]
     pub projects: Vec<Project>,
@@ -440,11 +391,6 @@ impl DeletedItem {
             default_tool: project.default_tool.clone(),
             commands: project.commands.clone(),
             connection_id: project.connection_id.clone(),
-            ssh_target: project.ssh_target.clone(),
-            ssh_key_file: project.ssh_key_file.clone(),
-            ssh_key_path: project.ssh_key_path.clone(),
-            ssh_password_enc: project.ssh_password_enc.clone(),
-            ssh_key_pass_enc: project.ssh_key_pass_enc.clone(),
             projects: Vec::new(),
             deleted_at,
         }
@@ -463,11 +409,6 @@ impl DeletedItem {
             default_tool: String::new(),
             commands: Vec::new(),
             connection_id: String::new(),
-            ssh_target: String::new(),
-            ssh_key_file: String::new(),
-            ssh_key_path: String::new(),
-            ssh_password_enc: String::new(),
-            ssh_key_pass_enc: String::new(),
             projects: group.projects.clone(),
             deleted_at,
         }
@@ -568,13 +509,11 @@ pub fn format_utc_compact(ts: i64) -> String {
 }
 
 /// unix 秒 → `2026-09-18T03:09:00Z`。
-#[allow(dead_code)]
 pub fn format_rfc3339(ts: i64) -> String {
     let (year, month, day, hour, minute, second) = utc_components(ts);
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
-#[allow(dead_code)]
 pub fn rfc3339_now() -> String {
     format_rfc3339(current_unix_ts())
 }
@@ -752,7 +691,7 @@ mod tests {
     fn ssh_project_detection_and_windows_path() {
         let mut p = Project::new("srv", "", "");
         assert!(!p.is_ssh_project());
-        p.ssh_target = "abc@192.0.2.10".into();
+        p.connection_id = "cid".into();
         p.path = "/opt/foo".into();
         assert!(p.is_ssh_project());
         // 远程 Linux 路径天然无 Windows 路径：PowerShell/IDE/Explorer 自动不可用。
@@ -782,53 +721,30 @@ mod tests {
     }
 
     #[test]
-    fn ssh_fields_legacy_json_defaults() {
-        let json = r#"{"groups":[{"name":"G","projects":[{"name":"srv","sshTarget":"abc@h","path":"/opt/x"}]}]}"#;
+    fn leftover_project_ssh_json_keys_are_ignored() {
+        let json = r#"{"groups":[{"name":"G","projects":[{"name":"srv","sshTarget":"abc@h","sshKeyFile":"keys/k.key","sshPasswordEnc":"PW","path":"/opt/x"}]}]}"#;
         let data: ProjectData = serde_json::from_str(json).unwrap();
         let p = &data.groups[0].projects[0];
-        assert!(p.is_ssh_project());
-        assert_eq!(p.ssh_target, "abc@h");
-        assert!(p.ssh_key_file.is_empty());
-        assert!(p.ssh_key_path.is_empty());
-        assert!(p.ssh_password_enc.is_empty());
-        assert!(p.ssh_key_pass_enc.is_empty());
+        assert!(!p.is_ssh_project());
+        assert!(p.connection_id.is_empty());
+        let out = serde_json::to_value(p).unwrap();
+        assert!(out.get("sshTarget").is_none());
+        assert!(out.get("sshKeyFile").is_none());
+        assert!(out.get("sshPasswordEnc").is_none());
     }
 
     #[test]
-    fn ssh_fields_serde_names_round_trip() {
-        let mut p = Project::new("srv", "/opt/x", "");
-        p.ssh_target = "abc@h:2222".into();
-        p.ssh_key_file = "keys/abc.key".into();
-        p.ssh_key_path = r"C:\keys\id_ed25519".into();
-        p.ssh_password_enc = "PWENC".into();
-        p.ssh_key_pass_enc = "KPENC".into();
-        let out = serde_json::to_value(&p).unwrap();
-        assert_eq!(out["sshTarget"], "abc@h:2222");
-        assert_eq!(out["sshKeyFile"], "keys/abc.key");
-        assert_eq!(out["sshKeyPath"], r"C:\keys\id_ed25519");
-        assert_eq!(out["sshPasswordEnc"], "PWENC");
-        assert_eq!(out["sshKeyPassEnc"], "KPENC");
-        let back: Project = serde_json::from_value(out).unwrap();
-        assert_eq!(back, p);
-    }
-
-    #[test]
-    fn deleted_item_keeps_ssh_snapshot() {
-        let mut p = Project::new("srv", "/opt/x", "");
-        p.ssh_target = "abc@h".into();
-        p.ssh_key_file = "keys/k.key".into();
-        p.ssh_password_enc = "PWENC".into();
+    fn deleted_item_keeps_connection_id() {
+        let p = Project::new("srv", "/opt/x", "").with_connection("cid-1");
         let item = DeletedItem::from_project(&p, "G", 123);
-        assert_eq!(item.ssh_target, "abc@h");
-        assert_eq!(item.ssh_key_file, "keys/k.key");
-        assert_eq!(item.ssh_password_enc, "PWENC");
-        // 分组快照不携带 SSH 秘密（projects 内部项目自带完整字段）。
+        assert_eq!(item.connection_id, "cid-1");
         let mut g = Group::new("G");
         g.projects.push(p.clone());
         let gi = DeletedItem::from_group(&g, 123);
-        assert!(gi.ssh_target.is_empty());
+        assert!(gi.connection_id.is_empty());
         let json = serde_json::to_value(&gi).unwrap();
-        assert_eq!(json["projects"][0]["sshTarget"], "abc@h");
+        assert_eq!(json["projects"][0]["connectionId"], "cid-1");
+        assert!(json.get("sshTarget").is_none());
     }
 
     #[test]

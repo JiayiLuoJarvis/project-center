@@ -673,7 +673,6 @@ fn add_ssh_project_picks_existing_connection() {
     let p = &data.groups[0].projects[1];
     assert!(p.is_ssh_project());
     assert_eq!(p.connection_id, cid);
-    assert!(p.ssh_target.is_empty());
     assert_eq!(p.path, "/opt/x");
     assert!(p.wsl_path.is_empty());
 
@@ -965,7 +964,6 @@ fn edit_ssh_project_keeps_connection_on_save() {
     let p = &data.groups[0].projects[0];
     assert_eq!(p.connection_id, cid);
     assert_eq!(p.path, "/opt/x");
-    assert!(p.ssh_target.is_empty());
 
     let _ = std::fs::remove_dir_all(&temp_appdata);
 }

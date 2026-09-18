@@ -1,6 +1,4 @@
-use super::{
-    Error, Result, find_group, find_project, find_project_by_id, project_label_taken, trash,
-};
+use super::{Error, Result, find_group, find_project, find_project_by_id, project_label_taken};
 use crate::domain::models::{
     DeletedItem, Project, ProjectData, current_unix_ts, win_path_to_linux,
 };
@@ -101,25 +99,6 @@ pub fn remove_project_by_id(
     Ok(remove_project_at(data, group_index, project_index, force))
 }
 
-/// 定位项目并原地更新 SSH 字段；返回更新后的项目克隆。
-/// 定位支持名字 / `@<id>`（大小写不敏感、唯一前缀、分组消歧）。
-#[allow(dead_code)]
-pub fn edit_ssh_fields(
-    data: &mut ProjectData,
-    name: &str,
-    group: Option<&str>,
-    update: impl FnOnce(&mut Project),
-) -> Result<Project> {
-    let (group_index, project_index) = if let Some(id) = name.strip_prefix('@') {
-        find_project_by_id(data, id, group)?
-    } else {
-        find_project(data, name, group)?
-    };
-    let project = &mut data.groups[group_index].projects[project_index];
-    update(project);
-    Ok(project.clone())
-}
-
 fn remove_project_at(
     data: &mut ProjectData,
     group_index: usize,
@@ -134,8 +113,6 @@ fn remove_project_at(
             &group_name,
             current_unix_ts(),
         ));
-    } else {
-        trash::drop_key_file(data, &project.ssh_key_file);
     }
     project
 }

@@ -901,8 +901,6 @@ mod tests {
         let cid = data.connections[0].id.clone();
         assert_eq!(data.groups[0].projects[0].connection_id, cid);
         assert_eq!(data.groups[0].projects[1].connection_id, cid);
-        assert!(data.groups[0].projects[0].ssh_target.is_empty());
-        assert!(data.groups[0].projects[1].ssh_target.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -921,11 +919,9 @@ mod tests {
             }
         }
         assert_eq!(loaded.connections.len(), 1);
-        let disk: ProjectData =
-            serde_json::from_str(&std::fs::read_to_string(dir.join("projects.json")).unwrap())
-                .unwrap();
-        assert!(disk.groups[0].projects[0].ssh_target.is_empty());
-        assert!(disk.groups[0].projects[1].ssh_target.is_empty());
+        let written = std::fs::read_to_string(dir.join("projects.json")).unwrap();
+        assert!(!written.contains("sshTarget"));
+        let disk: ProjectData = serde_json::from_str(&written).unwrap();
         assert!(!disk.groups[0].projects[0].connection_id.is_empty());
         assert_eq!(
             disk.groups[0].projects[0].connection_id,

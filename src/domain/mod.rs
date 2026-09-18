@@ -10,7 +10,6 @@ mod project;
 mod trash;
 
 pub(crate) use command::*;
-#[allow(unused_imports)]
 pub(crate) use connection::*;
 pub(crate) use error::{Error, Result};
 pub(crate) use group::*;

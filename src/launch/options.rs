@@ -130,8 +130,7 @@ mod tests {
 
     #[test]
     fn build_options_ssh_project_single_terminal() {
-        let mut p = Project::new("srv", "/opt/x", "");
-        p.ssh_target = "abc@h".into();
+        let mut p = Project::new("srv", "/opt/x", "").with_connection("cid");
         // SSH 项目即使有自定义命令与默认工具也只产出「SSH · 终端」
         p.commands = vec![ProjectCommand::new("构建", "wsl", "make")];
         p.default_tool = "构建".into();
