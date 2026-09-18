@@ -18,6 +18,9 @@ pub struct Project {
     /// 项目级自定义命令。
     #[serde(rename = "commands", default)]
     pub commands: Vec<ProjectCommand>,
+    /// 引用的远程连接；非空即 SSH 项目（启动前再校验连接存在）。
+    #[serde(rename = "connectionId", default)]
+    pub connection_id: String,
     /// SSH 目标（如 `user@host` 或 `user@host:2222`）；非空即 SSH 远程项目。
     #[serde(rename = "sshTarget", default)]
     pub ssh_target: String,
@@ -50,6 +53,7 @@ impl Project {
             wsl_path: wsl_path.into(),
             default_tool: String::new(),
             commands: Vec::new(),
+            connection_id: String::new(),
             ssh_target: String::new(),
             ssh_key_file: String::new(),
             ssh_key_path: String::new(),
@@ -58,15 +62,25 @@ impl Project {
         }
     }
 
-    /// 是否 SSH 远程项目：`sshTarget` 非空即判定，与本地/WSL 路径互斥。
+    /// 是否 SSH 远程项目：遗留 `sshTarget` 或 `connectionId` 任一非空即判定。
     pub fn is_ssh_project(&self) -> bool {
-        !self.ssh_target.trim().is_empty()
+        !self.ssh_target.trim().is_empty() || !self.connection_id.trim().is_empty()
     }
 
     /// 把项目切换为 SSH 项目（add 入口使用）。
     pub fn with_ssh_target(mut self, target: impl Into<String>) -> Self {
         self.ssh_target = target.into();
         self
+    }
+
+    pub fn with_connection(mut self, id: impl Into<String>) -> Self {
+        self.connection_id = id.into();
+        self
+    }
+
+    pub fn connection_id_opt(&self) -> Option<&str> {
+        let id = self.connection_id.trim();
+        if id.is_empty() { None } else { Some(id) }
     }
 
     pub fn with_alias(mut self, alias: impl Into<String>) -> Self {
@@ -158,12 +172,191 @@ impl Group {
     }
 }
 
+/// 可复用远程连接（`projects.json` 顶层 `connections[]`）。认证与 host 归连接，项目只持 id + 远程路径。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Connection {
+    #[serde(default)]
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub user: String,
+    pub host: String,
+    #[serde(default = "default_ssh_port")]
+    pub port: u16,
+    #[serde(rename = "sshKeyFile", default)]
+    pub ssh_key_file: String,
+    #[serde(rename = "sshKeyPath", default)]
+    pub ssh_key_path: String,
+    #[serde(rename = "sshPasswordEnc", default)]
+    pub ssh_password_enc: String,
+    #[serde(rename = "sshKeyPassEnc", default)]
+    pub ssh_key_pass_enc: String,
+    /// RFC3339 UTC `...Z`，可按字典序比较。
+    #[serde(rename = "updatedAt", default)]
+    pub updated_at: String,
+}
+
+fn default_ssh_port() -> u16 {
+    22
+}
+
+impl Default for Connection {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            user: String::new(),
+            host: String::new(),
+            port: 22,
+            ssh_key_file: String::new(),
+            ssh_key_path: String::new(),
+            ssh_password_enc: String::new(),
+            ssh_key_pass_enc: String::new(),
+            updated_at: String::new(),
+        }
+    }
+}
+
+impl Connection {
+    pub fn new(name: impl Into<String>, endpoint: &Endpoint, now: &str) -> Self {
+        Self {
+            id: Uuid::new_v4().to_string(),
+            name: name.into(),
+            user: endpoint.user.clone(),
+            host: endpoint.host.clone(),
+            port: endpoint.port,
+            ssh_key_file: String::new(),
+            ssh_key_path: String::new(),
+            ssh_password_enc: String::new(),
+            ssh_key_pass_enc: String::new(),
+            updated_at: now.to_string(),
+        }
+    }
+
+    pub fn endpoint(&self) -> Endpoint {
+        Endpoint {
+            user: self.user.clone(),
+            host: self.host.clone(),
+            port: self.port,
+        }
+    }
+
+    /// `user@host` 或 `host`（ssh 位置参数）。
+    pub fn userhost(&self) -> String {
+        if self.user.trim().is_empty() {
+            self.host.clone()
+        } else {
+            format!("{}@{}", self.user, self.host)
+        }
+    }
+
+    /// 列表显示：`user@host:port`（port 22 也显示，避免歧义）。
+    pub fn label(&self) -> String {
+        format!("{}:{}", self.userhost(), self.port)
+    }
+
+    pub fn has_saved_secrets(&self) -> bool {
+        !self.ssh_password_enc.trim().is_empty() || !self.ssh_key_pass_enc.trim().is_empty()
+    }
+
+    pub fn has_key(&self) -> bool {
+        !self.ssh_key_file.trim().is_empty()
+    }
+}
+
+/// 规范化的 SSH 端点：迁移合并键与 `--ssh` 复用键都由它决定。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Endpoint {
+    pub user: String,
+    pub host: String,
+    pub port: u16,
+}
+
+impl Endpoint {
+    /// `[user@]host[:port]`；host 含 `:`（IPv6）或含 `@`、端口非数字 → Err。
+    pub fn parse(target: &str) -> super::Result<Endpoint> {
+        let target = target.trim();
+        if target.is_empty() {
+            return Err(super::Error::ConnectionHostEmpty);
+        }
+        let (user, rest) = match target.split_once('@') {
+            Some((user, rest)) => {
+                if user.contains('@') || rest.contains('@') {
+                    return Err(super::Error::ConnectionAtSign);
+                }
+                (user.to_string(), rest)
+            }
+            None => (String::new(), target),
+        };
+        let (host, port) = split_host_port(rest);
+        if host.is_empty() {
+            return Err(super::Error::ConnectionHostEmpty);
+        }
+        if host.contains(':') {
+            return Err(super::Error::ConnectionIpv6);
+        }
+        if host.contains('@') {
+            return Err(super::Error::ConnectionAtSign);
+        }
+        let port = match port {
+            Some(port) => {
+                let parsed: u16 = port
+                    .parse()
+                    .map_err(|_| super::Error::ConnectionPortInvalid)?;
+                if parsed == 0 {
+                    return Err(super::Error::ConnectionPortInvalid);
+                }
+                parsed
+            }
+            None => 22,
+        };
+        Ok(Endpoint {
+            user: user.trim().to_string(),
+            host: host.trim().to_string(),
+            port,
+        })
+    }
+
+    /// 合并键：`user.lower()@host.lower():port`。
+    pub fn key(&self) -> String {
+        format!(
+            "{}@{}:{}",
+            self.user.to_ascii_lowercase(),
+            self.host.to_ascii_lowercase(),
+            self.port
+        )
+    }
+}
+
+/// 拆出主机与可选端口：`host:port` -> `(host, Some(port))`。
+/// 仅当 host 部分不含 `:` 且末段为纯数字时视为端口；IPv6 目标不拆。
+pub(crate) fn split_host_port(rest: &str) -> (&str, Option<&str>) {
+    match rest.rfind(':') {
+        Some(pos) => {
+            let (host, port) = rest.split_at(pos);
+            let port = &port[1..];
+            if !host.is_empty()
+                && !host.contains(':')
+                && !port.is_empty()
+                && port.bytes().all(|b| b.is_ascii_digit())
+            {
+                (host, Some(port))
+            } else {
+                (rest, None)
+            }
+        }
+        None => (rest, None),
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectData {
     #[serde(default)]
     pub groups: Vec<Group>,
     #[serde(default)]
     pub trash: Vec<DeletedItem>,
+    #[serde(default)]
+    pub connections: Vec<Connection>,
     /// 删除失败的私钥 sidecar 相对路径，每次启动重试删除（成功即摘除）。
     #[serde(rename = "pendingKeyDeletes", default)]
     pub pending_key_deletes: Vec<String>,
@@ -194,6 +387,8 @@ pub struct DeletedItem {
     /// 项目项的自定义命令快照。
     #[serde(rename = "commands", default)]
     pub commands: Vec<ProjectCommand>,
+    #[serde(rename = "connectionId", default)]
+    pub connection_id: String,
     /// SSH 目标快照。
     #[serde(rename = "sshTarget", default)]
     pub ssh_target: String,
@@ -237,6 +432,7 @@ impl DeletedItem {
             wsl_path: project.wsl_path.clone(),
             default_tool: project.default_tool.clone(),
             commands: project.commands.clone(),
+            connection_id: project.connection_id.clone(),
             ssh_target: project.ssh_target.clone(),
             ssh_key_file: project.ssh_key_file.clone(),
             ssh_key_path: project.ssh_key_path.clone(),
@@ -259,6 +455,7 @@ impl DeletedItem {
             wsl_path: String::new(),
             default_tool: String::new(),
             commands: Vec::new(),
+            connection_id: String::new(),
             ssh_target: String::new(),
             ssh_key_file: String::new(),
             ssh_key_path: String::new(),
@@ -361,6 +558,16 @@ pub fn format_date(ts: i64) -> String {
 pub fn format_utc_compact(ts: i64) -> String {
     let (year, month, day, hour, minute, second) = utc_components(ts);
     format!("{year:04}{month:02}{day:02}-{hour:02}{minute:02}{second:02}")
+}
+
+/// unix 秒 → `2026-09-18T03:09:00Z`。
+pub fn format_rfc3339(ts: i64) -> String {
+    let (year, month, day, hour, minute, second) = utc_components(ts);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
+}
+
+pub fn rfc3339_now() -> String {
+    format_rfc3339(current_unix_ts())
 }
 
 /// 归一化路径：`\` -> `/`、去除首尾空白、折叠连续斜杠。
@@ -542,6 +749,27 @@ mod tests {
         // 远程 Linux 路径天然无 Windows 路径：PowerShell/IDE/Explorer 自动不可用。
         assert!(!p.has_windows_path());
         assert_eq!(p.linux_path(), "/opt/foo");
+        let by_id = Project::new("srv", "/opt/foo", "").with_connection("cid");
+        assert!(by_id.is_ssh_project());
+        assert_eq!(by_id.connection_id_opt(), Some("cid"));
+    }
+
+    #[test]
+    fn connection_json_defaults_and_round_trip() {
+        let json = r#"{"groups":[{"name":"G","projects":[{"name":"srv","connectionId":"cid-1","path":"/opt/x"}]}],"connections":[{"id":"cid-1","name":"box","user":"abc","host":"h","sshKeyFile":"keys/cid-1.key","updatedAt":"2026-09-18T00:00:00Z"}]}"#;
+        let data: ProjectData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.groups[0].projects[0].connection_id, "cid-1");
+        assert_eq!(data.connections.len(), 1);
+        assert_eq!(data.connections[0].port, 22);
+        assert_eq!(data.connections[0].name, "box");
+        let out = serde_json::to_value(&data).unwrap();
+        assert_eq!(out["groups"][0]["projects"][0]["connectionId"], "cid-1");
+        assert_eq!(out["connections"][0]["sshKeyFile"], "keys/cid-1.key");
+        assert_eq!(out["connections"][0]["updatedAt"], "2026-09-18T00:00:00Z");
+        let empty: ProjectData =
+            serde_json::from_str(r#"{"groups":[{"name":"G","projects":[{"name":"x"}]}]}"#).unwrap();
+        assert!(empty.connections.is_empty());
+        assert!(empty.groups[0].projects[0].connection_id.is_empty());
     }
 
     #[test]
@@ -796,6 +1024,9 @@ mod tests {
         // UTC 版本与 utc_components 完全一致（备份命名可跨时区/夏令时）
         assert_eq!(format_utc_compact(0), "19700101-000000");
         assert_eq!(format_utc_compact(951782400), "20000229-000000");
+        assert_eq!(format_rfc3339(0), "1970-01-01T00:00:00Z");
+        assert_eq!(format_rfc3339(951782400), "2000-02-29T00:00:00Z");
+        assert!(rfc3339_now().ends_with('Z'));
 
         let parts: Vec<i64> = date.split('-').map(|s| s.parse().unwrap()).collect();
         let (d_year, d_month, d_day) = (parts[0], parts[1] as u32, parts[2] as u32);

@@ -97,6 +97,7 @@ mod tests {
                     wsl_path: "/mnt/e/old".into(),
                     default_tool: String::new(),
                     commands: Vec::new(),
+                    connection_id: String::new(),
                     ssh_target: String::new(),
                     ssh_key_file: String::new(),
                     ssh_key_path: String::new(),
@@ -115,6 +116,7 @@ mod tests {
                     wsl_path: String::new(),
                     default_tool: String::new(),
                     commands: Vec::new(),
+                    connection_id: String::new(),
                     ssh_target: String::new(),
                     ssh_key_file: String::new(),
                     ssh_key_path: String::new(),
@@ -124,6 +126,7 @@ mod tests {
                     deleted_at: 1700000000,
                 },
             ],
+            connections: Vec::new(),
             pending_key_deletes: Vec::new(),
         }
     }

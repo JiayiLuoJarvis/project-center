@@ -83,6 +83,7 @@ fn restore_project(data: &mut ProjectData, item: DeletedItem) -> Result<String> 
         wsl_path: item.wsl_path.clone(),
         default_tool: item.default_tool.clone(),
         commands: item.commands.clone(),
+        connection_id: item.connection_id.clone(),
         ssh_target: item.ssh_target.clone(),
         ssh_key_file: item.ssh_key_file.clone(),
         ssh_key_path: item.ssh_key_path.clone(),

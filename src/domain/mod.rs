@@ -1,6 +1,7 @@
 //! 内存中的项目数据、查找与 CRUD。
 
 mod command;
+mod connection;
 mod error;
 mod group;
 mod lookup;
@@ -9,6 +10,8 @@ mod project;
 mod trash;
 
 pub(crate) use command::*;
+#[allow(unused_imports)]
+pub(crate) use connection::*;
 pub(crate) use error::{Error, Result};
 pub(crate) use group::*;
 pub(crate) use lookup::*;
