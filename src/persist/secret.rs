@@ -369,9 +369,15 @@ pub fn shred_and_remove(path: &Path) {
     let _ = std::fs::remove_file(path);
 }
 
-/// 收集 `data` 引用的全部 key 文件相对路径（groups + trash 快照）。
+/// 收集 `data` 引用的全部 key 文件相对路径（连接 + 项目 / 回收站遗留字段）。
+/// 项目级字段在后续删除前仍并入，避免迁移窗口误删 sidecar。
 pub fn referenced_key_files(data: &ProjectData) -> Vec<String> {
     let mut refs = Vec::new();
+    for conn in &data.connections {
+        if !conn.ssh_key_file.trim().is_empty() {
+            refs.push(conn.ssh_key_file.clone());
+        }
+    }
     for project in data.groups.iter().flat_map(|g| &g.projects) {
         if !project.ssh_key_file.trim().is_empty() {
             refs.push(project.ssh_key_file.clone());
@@ -612,6 +618,22 @@ mod tests {
         assert!(refs.contains(&"keys/c.key".to_string()));
         assert!(refs.contains(&"keys/d.key".to_string()));
         assert!(!refs.contains(&"keys/b.key".to_string()));
+    }
+
+    #[test]
+    fn referenced_key_files_includes_connection_keys() {
+        let mut data = ProjectData::default();
+        data.groups.push(Group {
+            name: "G".into(),
+            alias: String::new(),
+            projects: vec![ssh_project("keys/legacy.key")],
+        });
+        let mut conn = crate::domain::models::Connection::default();
+        conn.ssh_key_file = "keys/conn.key".into();
+        data.connections.push(conn);
+        let refs = referenced_key_files(&data);
+        assert!(refs.contains(&"keys/conn.key".to_string()));
+        assert!(refs.contains(&"keys/legacy.key".to_string()));
     }
 
     #[cfg(windows)]

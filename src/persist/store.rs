@@ -1,6 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use crate::domain::models::{ProjectData, current_unix_ts, format_utc_compact};
+use crate::domain::KeyRename;
+use crate::domain::models::{ProjectData, current_unix_ts, format_utc_compact, rfc3339_now};
+
+use super::legacy::harvest_legacy_ssh;
 
 /// 备份文件轮转上限：超出后删除最旧的备份。
 pub const MAX_BACKUPS: usize = 10;
@@ -58,7 +61,7 @@ impl Store {
 
     pub fn load() -> ProjectData {
         let path = Self::file_path();
-        let (mut data, backfilled, recovered) = Self::load_from_inner(&path);
+        let (mut data, backfilled, recovered, migrated) = Self::load_from_inner(&path, true);
         // 超过保留期的回收站项自动清理。
         let purged = crate::domain::purge_expired_trash(&mut data);
         // 数据退化（损坏且无备份、或从备份恢复）时引用集不可信，
@@ -66,17 +69,17 @@ impl Store {
         let allow_orphan_sweep = !recovered && orphan_sweep_allowed(&data);
         // 秘密维护：pendingKeyDeletes 重试、孤儿 key 清理、tmp 残留清理。
         let maintained = crate::persist::startup_maintenance(&mut data, allow_orphan_sweep);
-        // 回填 id / 损坏恢复 / 清理过期项后立即写回，避免只读命令丢恢复结果。
-        if backfilled || recovered || purged || maintained {
+        // 回填 id / 损坏恢复 / SSH 迁移 / 清理过期项后立即写回，避免只读命令丢恢复结果。
+        if backfilled || recovered || purged || maintained || migrated {
             let _ = Self::save_to(&data, &path);
         }
         data
     }
 
-    /// 只读加载（`__askpass` 专用）：不写回、不做维护，
+    /// 只读加载（`__askpass` 专用）：不写回、不改名密钥、不做维护，
     /// 避免与正在运行的父进程产生 projects.json 写竞态。
     pub fn load_readonly() -> ProjectData {
-        Self::load_from_inner(&Self::file_path()).0
+        Self::load_from_inner(&Self::file_path(), false).0
     }
 
     pub fn save(data: &ProjectData) -> bool {
@@ -85,30 +88,39 @@ impl Store {
 
     #[cfg(test)]
     pub fn load_from(p: &Path) -> ProjectData {
-        Self::load_from_inner(p).0
+        Self::load_from_inner(p, true).0
     }
 
-    /// 加载数据并回填缺失的项目 id；返回（数据，是否回填了 id，是否从备份恢复）。
-    fn load_from_inner(p: &Path) -> (ProjectData, bool, bool) {
+    /// 加载数据并回填缺失的项目 id；返回（数据，是否回填了 id，是否从备份恢复，是否做了 SSH 迁移）。
+    /// `apply_key_fs`：写路径改名 sidecar；只读加载必须为 false。
+    fn load_from_inner(p: &Path, apply_key_fs: bool) -> (ProjectData, bool, bool, bool) {
         let Ok(text) = std::fs::read_to_string(p) else {
-            return (ProjectData::default(), false, false);
+            return (ProjectData::default(), false, false, false);
         };
         match parse_projects(&text) {
-            Some(parsed) => (parsed.0, parsed.1, false),
+            Some(mut parsed) => {
+                if apply_key_fs {
+                    apply_key_renames(p.parent(), &mut parsed);
+                }
+                (parsed.data, parsed.backfilled, false, parsed.migrated)
+            }
             None => {
                 // 损坏：改名保留现场，依次尝试「最新可用备份 -> 空数据」。
                 Self::quarantine_corrupt(p);
                 match recover_from_backups(p) {
-                    Some(parsed) => {
+                    Some((mut parsed, backup)) => {
                         eprintln!(
                             "projects.json 损坏，已改名保存，并从备份恢复: {}",
-                            parsed.1.display()
+                            backup.display()
                         );
-                        (parsed.0, parsed.2, true)
+                        if apply_key_fs {
+                            apply_key_renames(p.parent(), &mut parsed);
+                        }
+                        (parsed.data, parsed.backfilled, true, parsed.migrated)
                     }
                     None => {
                         eprintln!("projects.json 损坏，无可用备份，已使用空数据。");
-                        (ProjectData::default(), false, false)
+                        (ProjectData::default(), false, false, false)
                     }
                 }
             }
@@ -140,17 +152,26 @@ impl Store {
     }
 }
 
-/// 孤儿 key 清理的允许条件：groups 与 trash 快照至少一个非空（引用集可信）。
+/// 孤儿 key 清理的允许条件：groups / trash / connections 至少一个非空（引用集可信）。
 /// 数据为空可能是「损坏兜底到空数据」或「首启文件缺失」，此时 `keys\` 下
 /// 任何文件都可能是最后一次正常数据引用的密钥，一律不清理。
 fn orphan_sweep_allowed(data: &ProjectData) -> bool {
-    !data.groups.is_empty() || !data.trash.is_empty()
+    !data.groups.is_empty() || !data.trash.is_empty() || !data.connections.is_empty()
 }
 
-/// 解析文本并回填缺失的项目 id（含回收站项与分组快照内项目）；
-/// 解析失败返回 None。
-fn parse_projects(text: &str) -> Option<(ProjectData, bool)> {
-    let mut data: ProjectData = serde_json::from_str(text).ok()?;
+struct ParsedProjects {
+    data: ProjectData,
+    backfilled: bool,
+    migrated: bool,
+    key_renames: Vec<KeyRename>,
+}
+
+/// 解析文本：Value 采集遗留 SSH → 结构化 → 回填 id → absorb。
+/// 解析失败返回 None（损坏门控不变）。
+fn parse_projects(text: &str) -> Option<ParsedProjects> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let records = harvest_legacy_ssh(&value);
+    let mut data: ProjectData = serde_json::from_value(value).ok()?;
     let mut backfilled = false;
     for group in &mut data.groups {
         for project in &mut group.projects {
@@ -172,7 +193,43 @@ fn parse_projects(text: &str) -> Option<(ProjectData, bool)> {
             }
         }
     }
-    Some((data, backfilled))
+    let now = rfc3339_now();
+    let mig = data.absorb_legacy_ssh(records, &now);
+    Some(ParsedProjects {
+        data,
+        backfilled,
+        migrated: mig.changed,
+        key_renames: mig.key_renames,
+    })
+}
+
+/// 改名成功（或目标已在位）才 relink；失败保持连接上的旧路径。
+fn apply_key_renames(root: Option<&Path>, parsed: &mut ParsedProjects) {
+    let Some(root) = root else {
+        return;
+    };
+    for rename in &parsed.key_renames {
+        if rename_key_file(root, &rename.from, &rename.to) {
+            parsed
+                .data
+                .relink_connection_key(&rename.connection_id, &rename.to);
+        }
+    }
+}
+
+fn rename_key_file(root: &Path, from: &str, to: &str) -> bool {
+    let from_path = root.join(from);
+    let to_path = root.join(to);
+    if let Some(parent) = to_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if to_path.exists() {
+        return true;
+    }
+    if !from_path.exists() {
+        return false;
+    }
+    std::fs::rename(from_path, to_path).is_ok()
 }
 
 /// 备份目录：与数据文件同目录下的 `backups\`。
@@ -244,9 +301,9 @@ fn prune_backups(dir: &Path, max: usize) {
     }
 }
 
-/// 从新到旧遍历备份，返回第一个可解析的（数据，备份路径，是否回填 id）；
+/// 从新到旧遍历备份，返回第一个可解析的（解析结果，备份路径）；
 /// 最新备份损坏/截断时仍可回退到更早的可用快照。
-fn recover_from_backups(p: &Path) -> Option<(ProjectData, PathBuf, bool)> {
+fn recover_from_backups(p: &Path) -> Option<(ParsedProjects, PathBuf)> {
     let dir = backup_dir(p)?;
     let names = backup_names(&dir);
     for name in names.iter().rev() {
@@ -254,7 +311,7 @@ fn recover_from_backups(p: &Path) -> Option<(ProjectData, PathBuf, bool)> {
             continue;
         };
         if let Some(parsed) = parse_projects(&text) {
-            return Some((parsed.0, dir.join(name), parsed.1));
+            return Some((parsed, dir.join(name)));
         }
     }
     None
@@ -451,7 +508,7 @@ mod tests {
             r#"{"groups":[{"name":"G","projects":[{"name":"x"}]}]}"#,
         )
         .unwrap();
-        let (data, backfilled, _) = Store::load_from_inner(&path);
+        let (data, backfilled, ..) = Store::load_from_inner(&path, true);
         assert!(backfilled);
         assert!(!data.groups[0].projects[0].id.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
@@ -471,7 +528,7 @@ mod tests {
             ..Default::default()
         };
         std::fs::write(&path, serde_json::to_string(&data).unwrap()).unwrap();
-        let (data, backfilled, _) = Store::load_from_inner(&path);
+        let (data, backfilled, ..) = Store::load_from_inner(&path, true);
         assert!(!backfilled);
         assert!(!data.groups[0].projects[0].id.is_empty());
         let _ = std::fs::remove_dir_all(&dir);
@@ -533,6 +590,11 @@ mod tests {
             kind: "project".into(),
             ..Default::default()
         });
+        assert!(orphan_sweep_allowed(&data));
+        // 仅有连接也可信（迁移后项目级 key 引用已清空）
+        let mut data = ProjectData::default();
+        data.connections
+            .push(crate::domain::models::Connection::default());
         assert!(orphan_sweep_allowed(&data));
     }
 
@@ -765,7 +827,7 @@ mod tests {
             r#"{"groups":[],"trash":[{"type":"project","name":"x"},{"type":"group","name":"g","projects":[{"name":"inner"}]}]}"#,
         )
         .unwrap();
-        let (data, backfilled, _) = Store::load_from_inner(&path);
+        let (data, backfilled, ..) = Store::load_from_inner(&path, true);
         assert!(backfilled);
         assert!(!data.trash[0].id.is_empty());
         assert!(!data.trash[1].id.is_empty());
@@ -813,6 +875,131 @@ mod tests {
         let data = Store::load_from(&path);
         assert!(data.groups.is_empty());
         assert!(corrupt_files(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn write_legacy_ssh_pair(dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(dir).unwrap();
+        let path = dir.join("projects.json");
+        std::fs::write(
+            &path,
+            r#"{"groups":[{"name":"G","projects":[
+              {"id":"11111111-1111-1111-1111-111111111111","name":"one","path":"/opt/a","sshTarget":"abc@h:22"},
+              {"id":"22222222-2222-2222-2222-222222222222","name":"two","path":"/opt/b","sshTarget":"ABC@H"}
+            ]}]}"#,
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn load_merges_two_projects_same_ssh_endpoint() {
+        let dir = temp_path();
+        let path = write_legacy_ssh_pair(&dir);
+        let data = Store::load_from(&path);
+        assert_eq!(data.connections.len(), 1);
+        let cid = data.connections[0].id.clone();
+        assert_eq!(data.groups[0].projects[0].connection_id, cid);
+        assert_eq!(data.groups[0].projects[1].connection_id, cid);
+        assert!(data.groups[0].projects[0].ssh_target.is_empty());
+        assert!(data.groups[0].projects[1].ssh_target.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_writes_back_cleared_ssh_target() {
+        let _lock = test_env::lock_appdata();
+        let dir = temp_path();
+        write_legacy_ssh_pair(&dir);
+        let saved = std::env::var_os("PCS_DATA_DIR");
+        unsafe { std::env::set_var("PCS_DATA_DIR", &dir) };
+        let loaded = Store::load();
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("PCS_DATA_DIR", value),
+                None => std::env::remove_var("PCS_DATA_DIR"),
+            }
+        }
+        assert_eq!(loaded.connections.len(), 1);
+        let disk: ProjectData =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("projects.json")).unwrap())
+                .unwrap();
+        assert!(disk.groups[0].projects[0].ssh_target.is_empty());
+        assert!(disk.groups[0].projects[1].ssh_target.is_empty());
+        assert!(!disk.groups[0].projects[0].connection_id.is_empty());
+        assert_eq!(
+            disk.groups[0].projects[0].connection_id,
+            disk.groups[0].projects[1].connection_id
+        );
+        assert_eq!(disk.connections.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_readonly_does_not_rename_key_files() {
+        let _lock = test_env::lock_appdata();
+        let dir = temp_path();
+        std::fs::create_dir_all(dir.join("keys")).unwrap();
+        std::fs::write(dir.join("keys").join("old-proj.key"), "enc").unwrap();
+        std::fs::write(
+            dir.join("projects.json"),
+            r#"{"groups":[{"name":"G","projects":[{
+              "id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+              "name":"one","path":"/opt/a",
+              "sshTarget":"abc@h",
+              "sshKeyFile":"keys/old-proj.key"
+            }]}]}"#,
+        )
+        .unwrap();
+        let saved = std::env::var_os("PCS_DATA_DIR");
+        unsafe { std::env::set_var("PCS_DATA_DIR", &dir) };
+        let data = Store::load_readonly();
+        let on_disk = std::fs::read_to_string(dir.join("projects.json")).unwrap();
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("PCS_DATA_DIR", value),
+                None => std::env::remove_var("PCS_DATA_DIR"),
+            }
+        }
+        assert_eq!(data.connections.len(), 1);
+        let cid = &data.connections[0].id;
+        assert!(dir.join("keys").join("old-proj.key").exists());
+        assert!(!dir.join("keys").join(format!("{cid}.key")).exists());
+        assert!(on_disk.contains("sshTarget"));
+        assert!(!on_disk.contains("connectionId"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_renames_legacy_key_file_after_absorb() {
+        let _lock = test_env::lock_appdata();
+        let dir = temp_path();
+        std::fs::create_dir_all(dir.join("keys")).unwrap();
+        std::fs::write(dir.join("keys").join("old-proj.key"), "enc").unwrap();
+        std::fs::write(
+            dir.join("projects.json"),
+            r#"{"groups":[{"name":"G","projects":[{
+              "id":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+              "name":"one","path":"/opt/a",
+              "sshTarget":"abc@h",
+              "sshKeyFile":"keys/old-proj.key"
+            }]}]}"#,
+        )
+        .unwrap();
+        let saved = std::env::var_os("PCS_DATA_DIR");
+        unsafe { std::env::set_var("PCS_DATA_DIR", &dir) };
+        let data = Store::load();
+        unsafe {
+            match saved {
+                Some(value) => std::env::set_var("PCS_DATA_DIR", value),
+                None => std::env::remove_var("PCS_DATA_DIR"),
+            }
+        }
+        let cid = &data.connections[0].id;
+        let expected = format!("keys/{cid}.key");
+        assert_eq!(data.connections[0].ssh_key_file, expected);
+        assert!(!dir.join("keys").join("old-proj.key").exists());
+        assert!(dir.join("keys").join(format!("{cid}.key")).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

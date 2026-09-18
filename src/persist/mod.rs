@@ -2,6 +2,7 @@
 
 mod config;
 mod error;
+mod legacy;
 mod secret;
 mod store;
 
