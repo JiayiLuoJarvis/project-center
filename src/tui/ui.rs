@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 
 use crate::domain::models::ProjectData;
 use crate::persist::AppConfig;
-use crate::tui::app::{App, Focus, FormField, Mode, RightPane};
+use crate::tui::app::{App, Focus, FormField, Mode, RightPane, SETTINGS_ITEMS};
 use crate::tui::theme;
 use crate::tui::widgets;
 
@@ -44,6 +44,10 @@ pub fn render(frame: &mut Frame, app: &App, data: &ProjectData, config: &AppConf
             selected,
             ..
         } => render_modal_list(frame, area, title, items, *selected),
+        Mode::SettingsMenu { selected } => {
+            let items: Vec<String> = SETTINGS_ITEMS.iter().map(|s| (*s).to_string()).collect();
+            render_modal_list(frame, area, "设置", &items, *selected);
+        }
         Mode::Help => render_help(frame, area),
         Mode::Confirm { message, .. } => render_confirm(frame, area, message),
         Mode::SecretViewer {
@@ -78,8 +82,9 @@ fn render_top(frame: &mut Frame, area: Rect, app: &App, data: &ProjectData) {
                 String::new()
             }
         }
-        RightPane::Trash => format!("回收站 · {} 项", data.trash.len()),
-        RightPane::ConfigEnvs | RightPane::ConfigTools { .. } => "配置".into(),
+        RightPane::Connections => format!("设置 · 远程连接 · {} 条", data.connections.len()),
+        RightPane::Trash => format!("设置 · 回收站 · {} 项", data.trash.len()),
+        RightPane::ConfigEnvs | RightPane::ConfigTools { .. } => "设置 · 启动工具".into(),
         RightPane::Commands { .. } => "自定义命令".into(),
     };
     let line = Line::from(vec![
@@ -125,15 +130,6 @@ fn render_left(frame: &mut Frame, area: Rect, app: &App, data: &ProjectData) {
                 };
                 items.push(widgets::simple_item(label));
             }
-            crate::tui::app::LeftItem::Trash => {
-                items.push(widgets::simple_item(format!(
-                    "回收站  {}",
-                    data.trash.len()
-                )));
-            }
-            crate::tui::app::LeftItem::Config => {
-                items.push(widgets::simple_item("配置"));
-            }
         }
     }
 
@@ -159,6 +155,7 @@ fn render_right(frame: &mut Frame, area: Rect, app: &App, data: &ProjectData, co
     if items.is_empty() {
         let empty = match app.right_pane {
             RightPane::Trash => "回收站为空",
+            RightPane::Connections => "（暂无远程连接）",
             RightPane::Projects => "（暂无项目）",
             RightPane::ConfigTools { .. } => "（暂无工具）",
             RightPane::Commands { .. } => "（暂无命令）",
@@ -194,12 +191,26 @@ fn right_content<'a>(
                 let indices = app.filtered_project_indices(data, gi);
                 let items = indices
                     .into_iter()
-                    .map(|i| widgets::project_item(&data.groups[gi].projects[i], config))
+                    .map(|i| {
+                        let p = &data.groups[gi].projects[i];
+                        widgets::project_item(p, config, data.connection_of(p).ok())
+                    })
                     .collect();
                 (format!("PROJECTS · {name}"), items)
             } else {
                 ("PROJECTS".into(), vec![])
             }
+        }
+        RightPane::Connections => {
+            let indices = app.filtered_connection_indices(data);
+            let items = indices
+                .into_iter()
+                .map(|i| {
+                    let conn = &data.connections[i];
+                    widgets::connection_item(conn, data.connection_refs(&conn.id))
+                })
+                .collect();
+            ("CONNECTIONS".into(), items)
         }
         RightPane::Trash => {
             let indices = app.filtered_trash_indices(data);
@@ -265,13 +276,18 @@ fn render_bottom(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let help = match app.right_pane {
-        RightPane::Trash => "enter/o 操作  r 恢复  d 彻底删除  D 清空  / 过滤  ? 帮助  q 退出",
+        RightPane::Trash => {
+            "enter/o 操作  r 恢复  d 彻底删除  D 清空  Esc 返回  / 过滤  ? 帮助  q 退出"
+        }
+        RightPane::Connections => {
+            "a 新增  e 编辑  d 删除  v 查看秘密  Esc 返回  / 过滤  ? 帮助  q 退出"
+        }
         RightPane::ConfigEnvs | RightPane::ConfigTools { .. } => {
             "enter 进入  a 新增  e 编辑  d 删除  Esc 返回  ? 帮助  q 退出"
         }
         RightPane::Commands { .. } => "enter/o 操作  a 新增  e 编辑  d 删除  Esc 返回  q 退出",
         RightPane::Projects => {
-            "enter 打开  o 操作  a 新增  e 编辑  d 删除  m 移动  / 过滤  ? 帮助  q 退出"
+            "enter 打开  o 操作  a 新增  e 编辑  d 删除  m 移动  , 设置  / 过滤  ? 帮助  q 退出"
         }
     };
     let line = Line::from(vec![
@@ -404,7 +420,7 @@ fn render_secret_viewer(
     match revealed {
         None => {
             lines.push(Line::from(Span::styled(
-                "输入 PIN 查看该项目的保存密码与口令",
+                "输入 PIN 查看该连接的保存密码与口令",
                 theme::muted(),
             )));
             lines.push(Line::from(""));
@@ -624,7 +640,7 @@ fn render_form(
                 }
                 lines.push(Line::from(spans));
             }
-            FormField::Button { label } => {
+            FormField::Button { label, .. } => {
                 let marker = if focused { "▶ " } else { "  " };
                 let style = if focused {
                     theme::selected().add_modifier(Modifier::BOLD)
@@ -636,6 +652,24 @@ fn render_form(
                     Span::styled(format!("[ {label} ]"), style),
                 ]));
             }
+            FormField::Select { label, display, .. } => {
+                let label_style = if focused {
+                    theme::accent().add_modifier(Modifier::BOLD)
+                } else {
+                    theme::muted()
+                };
+                lines.push(Line::from(Span::styled(label.clone(), label_style)));
+                let marker = if focused { "▶ " } else { "  " };
+                let style = if focused {
+                    theme::selected()
+                } else {
+                    theme::base()
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(marker, theme::accent()),
+                    Span::styled(format!("⌄ {display}"), style),
+                ]));
+            }
         }
         lines.push(Line::from(""));
     }
@@ -644,13 +678,12 @@ fn render_form(
         lines.push(Line::from(""));
     }
     lines.push(Line::from(Span::styled(
-        "Tab 切换  Enter 提交/确认  Esc 取消",
+        "Tab 切换  Enter 提交/确认  Ctrl+U 清空  Esc 取消",
         theme::muted(),
     )));
 
-    // 表单弹窗只有 60% 高且无滚动容器：字段多了（SSH 新增表单 12 字段）
-    // 在矮终端会裁掉尾部；按焦点滚动，保证当前字段首行始终可见。
-    let scroll = form_scroll_offset(fields, focus, inner.height as usize, error.is_some());
+    // 按 inner 宽高量真实折行高度，保证焦点字段（含底部密码块）整块可见。
+    let scroll = form_scroll_offset(fields, focus, inner.width, inner.height, error.is_some());
 
     frame.render_widget(
         Paragraph::new(lines)
@@ -661,23 +694,22 @@ fn render_form(
     );
 }
 
-/// 表单滚动偏移：保证焦点字段首行始终可见（绝不把焦点滚出屏）。
-/// Text/Password 占 3 行（标签/值/空行），Button 占 2 行；尾部为
-/// 错误行（有错 2 行）+ 底部提示行（1 行）。
+/// 表单滚动偏移：按 `inner_width` 量折行后的真实行高，保证焦点字段整块可见。
+/// 字段高于视口时露出底部（密码值行），避免「焦点在密码、视口停在标签」。
 pub(crate) fn form_scroll_offset(
     fields: &[FormField],
     focus: usize,
-    visible_height: usize,
+    inner_width: u16,
+    inner_height: u16,
     has_error: bool,
 ) -> u16 {
+    let width = inner_width.max(1) as usize;
+    let visible_height = inner_height as usize;
     let mut focused_start = 0usize;
     let mut focused_lines = 3usize;
     let mut line = 0usize;
     for (i, field) in fields.iter().enumerate() {
-        let height = match field {
-            FormField::Button { .. } => 2,
-            _ => 3,
-        };
+        let height = field_rendered_height(field, width);
         if i == focus {
             focused_start = line;
             focused_lines = height;
@@ -685,10 +717,62 @@ pub(crate) fn form_scroll_offset(
         line += height;
     }
     let total = line + if has_error { 2 } else { 0 } + 1;
-    let mut scroll = (focused_start + focused_lines).saturating_sub(visible_height);
-    scroll = scroll.min(focused_start);
+    let need = focused_start + focused_lines;
+    let mut scroll = need.saturating_sub(visible_height);
+    if focused_lines <= visible_height {
+        scroll = scroll.min(focused_start);
+    }
     scroll = scroll.min(total.saturating_sub(visible_height));
     scroll.min(u16::MAX as usize) as u16
+}
+
+fn field_rendered_height(field: &FormField, width: usize) -> usize {
+    match field {
+        FormField::Text { label, value } => {
+            wrapped_lines(label, width) + wrapped_lines(&format!("▶ {value}█"), width) + 1
+        }
+        FormField::Password {
+            label,
+            value,
+            empty_hint,
+        } => {
+            let shown = if value.is_empty() {
+                empty_hint.clone()
+            } else {
+                format!(
+                    "{}{}",
+                    "*".repeat(value.chars().count().min(16)),
+                    if value.chars().count() > 16 {
+                        "…"
+                    } else {
+                        ""
+                    }
+                )
+            };
+            wrapped_lines(label, width) + wrapped_lines(&format!("▶ {shown}█"), width) + 1
+        }
+        FormField::Button { label, .. } => wrapped_lines(&format!("▶ [ {label} ]"), width) + 1,
+        FormField::Select { label, display, .. } => {
+            wrapped_lines(label, width) + wrapped_lines(&format!("▶ ⌄ {display}"), width) + 1
+        }
+    }
+}
+
+fn wrapped_lines(text: &str, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let w = visual_cols(text);
+    if w == 0 {
+        return 1;
+    }
+    w.div_ceil(width)
+}
+
+fn visual_cols(text: &str) -> usize {
+    text.chars()
+        .map(|ch| if ch.is_ascii() { 1 } else { 2 })
+        .sum()
 }
 
 fn render_input(frame: &mut Frame, area: Rect, prompt: &str, buffer: &str, filter: bool) {
@@ -707,6 +791,7 @@ fn render_input(frame: &mut Frame, area: Rect, prompt: &str, buffer: &str, filte
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::app::ButtonAction;
 
     fn text_field() -> FormField {
         FormField::Text {
@@ -718,24 +803,47 @@ mod tests {
     fn button_field() -> FormField {
         FormField::Button {
             label: String::new(),
+            action: ButtonAction::PickFolder { target: 0 },
+        }
+    }
+
+    fn password_field(label: &str) -> FormField {
+        FormField::Password {
+            label: label.into(),
+            value: String::new(),
+            empty_hint: "（已保存，留空不改）".into(),
         }
     }
 
     #[test]
     fn form_scroll_keeps_focus_visible() {
-        // 12 文本字段：36 行 + 提示行 = 37 行内容
+        // 宽裕宽度下短 ASCII 标签不折行：文本 3 行、按钮 2 行。
         let fields: Vec<FormField> = (0..12).map(|_| text_field()).collect();
-        // 焦点在头部：不滚
-        assert_eq!(form_scroll_offset(&fields, 0, 16, false), 0);
-        // 焦点在尾部（首行 33）：滚到刚好容下该字段，且首行仍可见
-        assert_eq!(form_scroll_offset(&fields, 11, 16, false), 20);
-        // 可见高度足够：不滚
-        assert_eq!(form_scroll_offset(&fields, 11, 40, false), 0);
-        // 有错误行时尾部多 2 行
-        assert_eq!(form_scroll_offset(&fields, 11, 16, true), 20);
-        // 按钮占 2 行：焦点在按钮上按 2 行算
+        assert_eq!(form_scroll_offset(&fields, 0, 40, 16, false), 0);
+        assert_eq!(form_scroll_offset(&fields, 11, 40, 16, false), 20);
+        assert_eq!(form_scroll_offset(&fields, 11, 40, 40, false), 0);
+        assert_eq!(form_scroll_offset(&fields, 11, 40, 16, true), 20);
         let mixed = vec![text_field(), button_field(), text_field()];
-        assert_eq!(form_scroll_offset(&mixed, 1, 4, false), 1);
-        assert_eq!(form_scroll_offset(&mixed, 2, 4, false), 4);
+        assert_eq!(form_scroll_offset(&mixed, 1, 40, 4, false), 1);
+        assert_eq!(form_scroll_offset(&mixed, 2, 40, 4, false), 4);
+    }
+
+    #[test]
+    fn form_scroll_measures_wrapped_cjk_password() {
+        // 窄宽度下 CJK 标签折行，固定 3 行模型会把密码值裁掉。
+        let label = "登录密码（SSH 项目，可选，已保存时留空不改）";
+        let fields = vec![text_field(), text_field(), password_field(label)];
+        let width = 12u16;
+        let height = 6u16;
+        let pw_h = field_rendered_height(&fields[2], width as usize);
+        assert!(pw_h > 3, "CJK 标签应折行超过 3 行，实际 {pw_h}");
+        let scroll = form_scroll_offset(&fields, 2, width, height, false);
+        let start = field_rendered_height(&fields[0], width as usize)
+            + field_rendered_height(&fields[1], width as usize);
+        let visible_end = scroll as usize + height as usize;
+        assert!(
+            visible_end >= start + pw_h,
+            "焦点密码块应整块可见：start={start} h={pw_h} scroll={scroll} view_end={visible_end}"
+        );
     }
 }

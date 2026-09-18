@@ -1,5 +1,7 @@
 use super::*;
-use crate::domain::models::{DeletedItem, Group, Project, ProjectCommand};
+use crate::domain::models::{
+    Connection, DeletedItem, Endpoint, Group, Project, ProjectCommand, rfc3339_now,
+};
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -146,7 +148,7 @@ fn filter_reselects_first_match() {
     let mut config = AppConfig::defaults();
     let mut app = App::new(&data);
     app.focus = Focus::Groups;
-    app.left_sel = 2; // 配置项
+    app.left_sel = 1;
     app.handle(key(KeyCode::Char('/')), &mut data, &mut config);
     app.handle(key(KeyCode::Char('t')), &mut data, &mut config);
     assert_eq!(app.left_sel, 0);
@@ -161,7 +163,7 @@ fn filter_enter_opens_group() {
     let mut config = AppConfig::defaults();
     let mut app = App::new(&data);
     app.focus = Focus::Groups;
-    app.left_sel = 2;
+    app.left_sel = 1;
     app.handle(key(KeyCode::Char('/')), &mut data, &mut config);
     app.handle(key(KeyCode::Char('t')), &mut data, &mut config);
     app.handle(key(KeyCode::Enter), &mut data, &mut config);
@@ -224,25 +226,57 @@ fn filter_enter_trash_maps_selection() {
 }
 
 #[test]
-fn filter_enter_keeps_tail_item_position() {
+fn settings_comma_opens_overlay() {
     let mut data = sample();
     let mut config = AppConfig::defaults();
     let mut app = App::new(&data);
-    app.focus = Focus::Groups;
-    app.handle(key(KeyCode::Char('/')), &mut data, &mut config);
-    app.handle(key(KeyCode::Char('t')), &mut data, &mut config);
-    // 过滤视图 [tools, 回收站, 配置]，移动到配置
-    app.handle(key(KeyCode::Char('j')), &mut data, &mut config);
-    app.handle(key(KeyCode::Char('j')), &mut data, &mut config);
-    assert!(app.left_is_config(&data, app.left_sel));
+    app.handle(key(KeyCode::Char(',')), &mut data, &mut config);
+    assert!(matches!(app.mode, Mode::SettingsMenu { selected: 0 }));
+}
+
+#[test]
+fn settings_enter_connections_and_esc_stack() {
+    let mut data = sample();
+    let mut config = AppConfig::defaults();
+    let mut app = App::new(&data);
+    app.handle(key(KeyCode::Char(',')), &mut data, &mut config);
     app.handle(key(KeyCode::Enter), &mut data, &mut config);
-    assert!(app.filter.is_empty());
-    assert!(app.left_is_config(&data, app.left_sel));
+    assert!(matches!(app.mode, Mode::Browse));
+    assert!(matches!(app.right_pane, RightPane::Connections));
+    app.handle(key(KeyCode::Esc), &mut data, &mut config);
+    assert!(matches!(app.mode, Mode::SettingsMenu { selected: 0 }));
+    app.handle(key(KeyCode::Esc), &mut data, &mut config);
+    assert!(matches!(app.mode, Mode::Browse));
+    assert!(matches!(app.right_pane, RightPane::Projects));
+}
+
+#[test]
+fn settings_opens_trash_and_config() {
+    let mut data = sample();
+    let mut config = AppConfig::defaults();
+    let mut app = App::new(&data);
+    app.handle(key(KeyCode::Char(',')), &mut data, &mut config);
+    app.handle(key(KeyCode::Char('j')), &mut data, &mut config);
+    app.handle(key(KeyCode::Enter), &mut data, &mut config);
+    assert!(matches!(app.right_pane, RightPane::Trash));
+    app.handle(key(KeyCode::Esc), &mut data, &mut config);
+    app.handle(key(KeyCode::Char('j')), &mut data, &mut config);
+    app.handle(key(KeyCode::Enter), &mut data, &mut config);
     assert!(matches!(app.right_pane, RightPane::ConfigEnvs));
 }
 
 #[test]
-fn filter_enter_zero_match_lands_on_trash() {
+fn left_list_has_no_trash_or_config() {
+    let data = sample();
+    let app = App::new(&data);
+    let items = app.left_items(&data);
+    assert_eq!(items.len(), 2);
+    assert!(matches!(items[0], LeftItem::Group(0)));
+    assert!(matches!(items[1], LeftItem::Group(1)));
+}
+
+#[test]
+fn filter_enter_zero_match_stays_on_groups() {
     let mut data = sample();
     let mut config = AppConfig::defaults();
     let mut app = App::new(&data);
@@ -251,8 +285,8 @@ fn filter_enter_zero_match_lands_on_trash() {
     app.handle(key(KeyCode::Char('z')), &mut data, &mut config);
     app.handle(key(KeyCode::Enter), &mut data, &mut config);
     assert!(app.filter.is_empty());
-    assert!(app.left_is_trash(&data, app.left_sel));
-    assert!(matches!(app.right_pane, RightPane::Trash));
+    assert!(matches!(app.mode, Mode::Browse));
+    assert!(matches!(app.right_pane, RightPane::Projects));
 }
 
 #[test]
@@ -328,8 +362,10 @@ fn esc_pops_config_tools_to_envs() {
     let mut data = sample();
     let mut config = AppConfig::defaults();
     let mut app = App::new(&data);
-    app.left_sel = app.left_count(&data) - 1;
-    app.sync_right_pane(&data);
+    app.handle(key(KeyCode::Char(',')), &mut data, &mut config);
+    app.handle(key(KeyCode::Char('j')), &mut data, &mut config);
+    app.handle(key(KeyCode::Char('j')), &mut data, &mut config);
+    app.handle(key(KeyCode::Enter), &mut data, &mut config);
     app.focus = Focus::Projects;
     assert!(matches!(app.right_pane, RightPane::ConfigEnvs));
     app.right_sel = 0;
@@ -350,8 +386,10 @@ fn esc_clears_filter_before_popping_config_tools() {
     let mut data = sample();
     let mut config = AppConfig::defaults();
     let mut app = App::new(&data);
-    app.left_sel = app.left_count(&data) - 1;
-    app.sync_right_pane(&data);
+    app.handle(key(KeyCode::Char(',')), &mut data, &mut config);
+    app.handle(key(KeyCode::Char('j')), &mut data, &mut config);
+    app.handle(key(KeyCode::Char('j')), &mut data, &mut config);
+    app.handle(key(KeyCode::Enter), &mut data, &mut config);
     app.focus = Focus::Projects;
     app.right_sel = 1;
     app.handle(key(KeyCode::Enter), &mut data, &mut config);
@@ -423,7 +461,6 @@ fn add_group_when_no_groups_left() {
     app.focus = Focus::Groups;
     app.left_sel = 0;
     app.sync_right_pane(&data);
-    assert!(app.left_is_trash(&data, app.left_sel));
     app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
     assert!(matches!(
         app.mode,
@@ -435,14 +472,13 @@ fn add_group_when_no_groups_left() {
 }
 
 #[test]
-fn add_group_when_left_sel_on_trash() {
+fn add_group_when_focus_on_groups() {
     let mut data = sample();
     let mut config = AppConfig::defaults();
     let mut app = App::new(&data);
     app.focus = Focus::Groups;
-    app.left_sel = data.groups.len();
+    app.left_sel = 0;
     app.sync_right_pane(&data);
-    assert!(app.left_is_trash(&data, app.left_sel));
     app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
     assert!(matches!(
         app.mode,
@@ -530,49 +566,105 @@ fn form_tab_moves_focus_to_browse_button() {
     }
     assert!(matches!(
         app.handle(key(KeyCode::Enter), &mut data, &mut config),
-        Outcome::PickFolder
+        Outcome::PickFolder { target: 2 }
+    ));
+}
+
+fn seed_connection(
+    data: &mut ProjectData,
+    name: &str,
+    user: &str,
+    host: &str,
+    port: u16,
+) -> String {
+    let endpoint = Endpoint {
+        user: user.into(),
+        host: host.into(),
+        port,
+    };
+    let conn = Connection::new(name, &endpoint, &rfc3339_now());
+    let id = conn.id.clone();
+    data.connections.push(conn);
+    id
+}
+
+fn type_chars(app: &mut App, data: &mut ProjectData, config: &mut AppConfig, text: &str) {
+    for c in text.chars() {
+        app.handle(key(KeyCode::Char(c)), data, config);
+    }
+}
+
+#[test]
+fn project_form_layout_is_named_fields() {
+    let data = sample();
+    let fields = App::project_fields(&data, None);
+    assert_eq!(fields.len(), ProjectField::COUNT);
+    assert!(matches!(
+        fields[ProjectField::Connection as usize],
+        FormField::Select { .. }
+    ));
+    assert!(matches!(
+        fields[ProjectField::RemotePath as usize],
+        FormField::Text { .. }
     ));
 }
 
 #[test]
-fn add_ssh_project_via_form() {
-    // 提交会经 actions::save_data 写真实数据根：串行 + 把 APPDATA 指向
-    // 临时目录，避免污染 projects.json（并发下 rename 也可能冲突导致保存失败）。
+fn connection_form_layout_is_named_fields() {
+    let fields = App::connection_fields(None);
+    assert_eq!(fields.len(), ConnField::COUNT);
+    assert!(matches!(
+        fields[ConnField::Password as usize],
+        FormField::Password { .. }
+    ));
+    match &fields[ConnField::BrowseKey as usize] {
+        FormField::Button {
+            action: ButtonAction::PickFile { target },
+            ..
+        } => assert_eq!(*target, ConnField::KeySource as usize),
+        other => panic!("expected PickFile, got {other:?}"),
+    }
+}
+
+#[test]
+fn add_ssh_project_picks_existing_connection() {
     let _guard = crate::persist::test_env::lock_appdata();
     let temp_appdata = std::env::temp_dir().join(format!("pcs_tui_test_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp_appdata).unwrap();
     let _appdata = crate::persist::test_env::AppdataGuard::redirect(&temp_appdata);
 
     let mut data = sample();
+    let cid = seed_connection(&mut data, "14.10", "abc", "192.0.2.10", 22);
     let mut config = AppConfig::defaults();
     let mut app = App::new(&data);
     app.focus = Focus::Projects;
     app.left_sel = 0;
     app.sync_right_pane(&data);
     app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
-    // 字段 0：项目名
-    for c in "srv".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
-    // Tab 到字段 5（登录用户）
+    type_chars(&mut app, &mut data, &mut config, "srv");
     for _ in 0..5 {
         app.handle(key(KeyCode::Tab), &mut data, &mut config);
     }
-    for c in "abc".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+    app.handle(key(KeyCode::Enter), &mut data, &mut config);
+    assert!(matches!(
+        app.mode,
+        Mode::ListPicker {
+            kind: ListKind::PickConnection { .. },
+            ..
+        }
+    ));
+    app.handle(key(KeyCode::Enter), &mut data, &mut config);
+    match &app.mode {
+        Mode::Form { fields, .. } => {
+            assert_eq!(
+                App::field_value(fields, ProjectField::Connection as usize),
+                cid
+            );
+        }
+        other => panic!("expected project form, got {other:?}"),
     }
-    // 字段 6：主机
     app.handle(key(KeyCode::Tab), &mut data, &mut config);
-    for c in "192.0.2.10".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
-    // 字段 7：端口预填 22，直接留用
-    app.handle(key(KeyCode::Tab), &mut data, &mut config);
-    // 字段 8：远程路径
-    app.handle(key(KeyCode::Tab), &mut data, &mut config);
-    for c in "/opt/x".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
+    type_chars(&mut app, &mut data, &mut config, "/opt/x");
     app.handle(key(KeyCode::Enter), &mut data, &mut config);
     match &app.mode {
         Mode::Browse => {}
@@ -580,26 +672,166 @@ fn add_ssh_project_via_form() {
     }
     let p = &data.groups[0].projects[1];
     assert!(p.is_ssh_project());
-    assert_eq!(p.ssh_target, "abc@192.0.2.10:22");
+    assert_eq!(p.connection_id, cid);
+    assert!(p.ssh_target.is_empty());
     assert_eq!(p.path, "/opt/x");
     assert!(p.wsl_path.is_empty());
 
     let _ = std::fs::remove_dir_all(&temp_appdata);
 }
 
-#[cfg(windows)]
 #[test]
-fn add_ssh_project_with_secrets_via_form() {
-    // 新增表单直接携带密钥/密码/口令：一次提交完成秘密保存（设计 §9）。
+fn new_connection_from_picker_resumes_project_form() {
     let _guard = crate::persist::test_env::lock_appdata();
     let temp_appdata = std::env::temp_dir().join(format!("pcs_tui_test_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp_appdata).unwrap();
     let _appdata = crate::persist::test_env::AppdataGuard::redirect(&temp_appdata);
 
-    // 准备一个可导入的私钥源文件
-    let key_source = temp_appdata.join("source_key");
-    std::fs::write(&key_source, "-----BEGIN OPENSSH PRIVATE KEY-----").unwrap();
+    let mut data = sample();
+    let mut config = AppConfig::defaults();
+    let mut app = App::new(&data);
+    app.focus = Focus::Projects;
+    app.left_sel = 0;
+    app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
+    type_chars(&mut app, &mut data, &mut config, "srv");
+    for _ in 0..5 {
+        app.handle(key(KeyCode::Tab), &mut data, &mut config);
+    }
+    app.handle(key(KeyCode::Enter), &mut data, &mut config);
+    app.handle(key(KeyCode::Enter), &mut data, &mut config);
+    match &app.mode {
+        Mode::Form {
+            kind: FormKind::AddConnection { resume: Some(_) },
+            ..
+        } => {}
+        other => panic!("expected nested connection form, got {other:?}"),
+    }
+    type_chars(&mut app, &mut data, &mut config, "lab");
+    app.handle(key(KeyCode::Tab), &mut data, &mut config);
+    type_chars(&mut app, &mut data, &mut config, "abc");
+    app.handle(key(KeyCode::Tab), &mut data, &mut config);
+    type_chars(&mut app, &mut data, &mut config, "h");
+    app.handle(key(KeyCode::Enter), &mut data, &mut config);
+    match &app.mode {
+        Mode::Form {
+            kind: FormKind::AddProject { .. },
+            fields,
+            ..
+        } => {
+            let cid = App::field_value(fields, ProjectField::Connection as usize);
+            assert!(!cid.is_empty());
+            assert_eq!(data.connections.len(), 1);
+            assert_eq!(data.connections[0].host, "h");
+        }
+        other => panic!("expected resumed project form, got {other:?}"),
+    }
 
+    let _ = std::fs::remove_dir_all(&temp_appdata);
+}
+
+#[test]
+fn esc_from_nested_connection_form_returns_to_picker() {
+    let mut data = sample();
+    let mut config = AppConfig::defaults();
+    let mut app = App::new(&data);
+    app.focus = Focus::Projects;
+    app.left_sel = 0;
+    app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
+    for _ in 0..5 {
+        app.handle(key(KeyCode::Tab), &mut data, &mut config);
+    }
+    app.handle(key(KeyCode::Enter), &mut data, &mut config);
+    app.handle(key(KeyCode::Enter), &mut data, &mut config);
+    assert!(matches!(
+        app.mode,
+        Mode::Form {
+            kind: FormKind::AddConnection { resume: Some(_) },
+            ..
+        }
+    ));
+    app.handle(key(KeyCode::Esc), &mut data, &mut config);
+    assert!(matches!(
+        app.mode,
+        Mode::ListPicker {
+            kind: ListKind::PickConnection { .. },
+            ..
+        }
+    ));
+    app.handle(key(KeyCode::Esc), &mut data, &mut config);
+    assert!(matches!(
+        app.mode,
+        Mode::Form {
+            kind: FormKind::AddProject { .. },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn delete_connection_refuses_when_referenced() {
+    let mut data = sample();
+    let cid = seed_connection(&mut data, "lab", "abc", "h", 22);
+    data.groups[0].projects[0].connection_id = cid;
+    let mut config = AppConfig::defaults();
+    let mut app = App::new(&data);
+    app.handle(key(KeyCode::Char(',')), &mut data, &mut config);
+    app.handle(key(KeyCode::Enter), &mut data, &mut config);
+    app.handle(key(KeyCode::Char('d')), &mut data, &mut config);
+    assert!(matches!(app.mode, Mode::Browse));
+    assert!(
+        app.flash
+            .as_ref()
+            .is_some_and(|m| m.contains("引用") && m.contains("lab"))
+    );
+    assert_eq!(data.connections.len(), 1);
+}
+
+#[test]
+fn delete_unused_connection_confirms() {
+    let mut data = sample();
+    seed_connection(&mut data, "lab", "abc", "h", 22);
+    let mut config = AppConfig::defaults();
+    let mut app = App::new(&data);
+    app.handle(key(KeyCode::Char(',')), &mut data, &mut config);
+    app.handle(key(KeyCode::Enter), &mut data, &mut config);
+    app.handle(key(KeyCode::Char('d')), &mut data, &mut config);
+    assert!(matches!(
+        app.mode,
+        Mode::Confirm {
+            kind: ConfirmKind::DeleteConnection { .. },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn add_connection_from_settings_list() {
+    let _guard = crate::persist::test_env::lock_appdata();
+    let temp_appdata = std::env::temp_dir().join(format!("pcs_tui_test_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&temp_appdata).unwrap();
+    let _appdata = crate::persist::test_env::AppdataGuard::redirect(&temp_appdata);
+
+    let mut data = sample();
+    let mut config = AppConfig::defaults();
+    let mut app = App::new(&data);
+    app.handle(key(KeyCode::Char(',')), &mut data, &mut config);
+    app.handle(key(KeyCode::Enter), &mut data, &mut config);
+    app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
+    type_chars(&mut app, &mut data, &mut config, "lab");
+    app.handle(key(KeyCode::Tab), &mut data, &mut config);
+    app.handle(key(KeyCode::Tab), &mut data, &mut config);
+    type_chars(&mut app, &mut data, &mut config, "example.com");
+    app.handle(key(KeyCode::Enter), &mut data, &mut config);
+    assert!(matches!(app.mode, Mode::Browse));
+    assert_eq!(data.connections.len(), 1);
+    assert_eq!(data.connections[0].name, "lab");
+    assert_eq!(data.connections[0].host, "example.com");
+
+    let _ = std::fs::remove_dir_all(&temp_appdata);
+}
+
+#[test]
+fn ctrl_u_clears_focused_field() {
     let mut data = sample();
     let mut config = AppConfig::defaults();
     let mut app = App::new(&data);
@@ -607,194 +839,76 @@ fn add_ssh_project_with_secrets_via_form() {
     app.left_sel = 0;
     app.sync_right_pane(&data);
     app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
-    for c in "srv".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
+    type_chars(&mut app, &mut data, &mut config, "abc");
+    let mut ctrl_u = key(KeyCode::Char('u'));
+    ctrl_u.modifiers = KeyModifiers::CONTROL;
+    app.handle(ctrl_u, &mut data, &mut config);
+    match &app.mode {
+        Mode::Form { fields, .. } => assert_eq!(App::field_value(fields, 0), ""),
+        other => panic!("expected form, got {other:?}"),
     }
-    // Tab 到字段 5（登录用户）
-    for _ in 0..5 {
-        app.handle(key(KeyCode::Tab), &mut data, &mut config);
-    }
-    for c in "abc".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
-    // 字段 6：主机
-    app.handle(key(KeyCode::Tab), &mut data, &mut config);
-    for c in "h".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
-    // 字段 7 端口预填 22 留用，字段 8 远程路径留空：Tab 到字段 9（私钥来源路径）
-    for _ in 0..3 {
-        app.handle(key(KeyCode::Tab), &mut data, &mut config);
-    }
-    for c in key_source.to_string_lossy().chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
-    // 字段 10：登录密码
-    app.handle(key(KeyCode::Tab), &mut data, &mut config);
-    for c in "pw123".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
-    // 字段 11：私钥口令留空，直接提交
+}
+
+#[test]
+fn file_pick_fills_connection_key_source() {
+    let mut data = sample();
+    let mut config = AppConfig::defaults();
+    let mut app = App::new(&data);
+    app.handle(key(KeyCode::Char(',')), &mut data, &mut config);
     app.handle(key(KeyCode::Enter), &mut data, &mut config);
-    match &app.mode {
-        Mode::Browse => {}
-        other => panic!("提交成功应回浏览模式，实际 {other:?}"),
-    }
-    let p = &data.groups[0].projects[1];
-    assert!(p.is_ssh_project());
-    assert_eq!(p.ssh_target, "abc@h:22");
-    assert!(!p.ssh_password_enc.is_empty(), "密码应已加密保存");
-    assert_eq!(
-        crate::persist::unprotect(&p.ssh_password_enc).unwrap(),
-        "pw123"
+    app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
+    app.resume_after_file_pick(
+        Some(r"C:\keys\id_ed25519".into()),
+        ConnField::KeySource as usize,
     );
-    assert!(!p.ssh_key_file.is_empty(), "密钥应已导入 sidecar");
-    assert_eq!(
-        crate::persist::read_key_file(&p.ssh_key_file).unwrap(),
-        "-----BEGIN OPENSSH PRIVATE KEY-----"
-    );
-    assert_eq!(p.ssh_key_path, key_source.to_string_lossy());
-    // 普通项目路径未受影响
-    assert!(p.wsl_path.is_empty());
-
-    let _ = std::fs::remove_dir_all(&temp_appdata);
-}
-
-#[test]
-fn edit_ssh_project_uses_ssh_form() {
-    let mut data = sample();
-    {
-        let p = &mut data.groups[0].projects[0];
-        p.ssh_target = "abc@h".into();
-        p.path = "/opt/x".into();
-        p.ssh_password_enc = "PWENC".into();
-    }
-    let mut config = AppConfig::defaults();
-    let mut app = App::new(&data);
-    app.focus = Focus::Projects;
-    app.left_sel = 0;
-    app.sync_right_pane(&data);
-    app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
     match &app.mode {
-        Mode::Form { fields, .. } => {
-            assert_eq!(fields.len(), 7, "SSH 编辑表单 7 字段");
-            assert_eq!(App::field_value(fields, 0), "abc");
-            assert_eq!(App::field_value(fields, 1), "h");
-            assert_eq!(App::field_value(fields, 2), "");
-            assert_eq!(App::field_value(fields, 3), "/opt/x");
-            assert!(App::field_value(fields, 5).is_empty(), "密码初始为空");
-            // empty_hint 标明已存/未存；值行不再硬编码「未设置」。
-            let FormField::Password {
-                label, empty_hint, ..
-            } = &fields[5]
-            else {
-                panic!("字段 5 应为 Password，实际 {:?}", fields.get(5));
-            };
-            assert_eq!(label, "登录密码");
-            assert!(empty_hint.contains("已保存"), "实际 {empty_hint}");
-            let FormField::Password {
-                label, empty_hint, ..
-            } = &fields[6]
-            else {
-                panic!("字段 6 应为 Password，实际 {:?}", fields.get(6));
-            };
-            assert_eq!(label, "私钥口令");
-            assert!(empty_hint.contains("未设置"), "实际 {empty_hint}");
-        }
-        other => panic!("expected SSH form, got {other:?}"),
-    }
-}
-
-#[test]
-fn edit_ssh_form_labels_unsaved_when_no_secrets() {
-    // 无任何秘密的 SSH 项目：密码/口令 empty_hint 均标「未设置」。
-    let mut data = sample();
-    {
-        let p = &mut data.groups[0].projects[0];
-        p.ssh_target = "abc@h".into();
-    }
-    let mut config = AppConfig::defaults();
-    let mut app = App::new(&data);
-    app.focus = Focus::Projects;
-    app.left_sel = 0;
-    app.sync_right_pane(&data);
-    app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
-    match &app.mode {
-        Mode::Form { fields, .. } => {
-            let FormField::Password { empty_hint, .. } = &fields[5] else {
-                panic!("字段 5 应为 Password，实际 {:?}", fields.get(5));
-            };
-            assert!(empty_hint.contains("未设置"), "实际 {empty_hint}");
-            let FormField::Password { empty_hint, .. } = &fields[6] else {
-                panic!("字段 6 应为 Password，实际 {:?}", fields.get(6));
-            };
-            assert!(empty_hint.contains("未设置"), "实际 {empty_hint}");
-        }
-        other => panic!("expected SSH form, got {other:?}"),
-    }
-}
-
-#[test]
-fn edit_normal_project_shows_ssh_conversion_fields() {
-    let mut data = sample();
-    let mut config = AppConfig::defaults();
-    let mut app = App::new(&data);
-    app.focus = Focus::Projects;
-    app.left_sel = 0;
-    app.sync_right_pane(&data);
-    app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
-    match &app.mode {
-        Mode::Form { fields, .. } => {
-            assert_eq!(fields.len(), 9, "普通编辑表单含 SSH 转换字段");
-            assert_eq!(App::field_value(fields, 5), "");
-            assert_eq!(App::field_value(fields, 6), "");
-            assert_eq!(App::field_value(fields, 7), "22", "端口默认 22");
+        Mode::Form { fields, focus, .. } => {
+            assert_eq!(
+                App::field_value(fields, ConnField::KeySource as usize),
+                r"C:\keys\id_ed25519"
+            );
+            assert_eq!(*focus, ConnField::KeySource as usize);
         }
         other => panic!("expected form, got {other:?}"),
     }
 }
 
 #[test]
-fn compose_ssh_target_cases() {
-    assert_eq!(
-        App::compose_ssh_target("abc", "h", "22").unwrap(),
-        "abc@h:22"
+fn clear_key_button_marks_intent_on_connection_form() {
+    let mut data = sample();
+    let mut conn = Connection::new(
+        "lab",
+        &Endpoint {
+            user: "abc".into(),
+            host: "h".into(),
+            port: 22,
+        },
+        &rfc3339_now(),
     );
-    assert_eq!(App::compose_ssh_target("abc", "h", "").unwrap(), "abc@h");
-    assert_eq!(App::compose_ssh_target("", "h", "").unwrap(), "h");
-    assert_eq!(
-        App::compose_ssh_target(" abc ", " h ", " 22 ").unwrap(),
-        "abc@h:22"
-    );
-    assert!(App::compose_ssh_target("a@b", "h", "").is_err());
-    assert!(App::compose_ssh_target("abc", "a@h", "").is_err());
-    assert!(App::compose_ssh_target("abc", "h", "22x").is_err());
-}
-
-#[test]
-fn split_ssh_target_roundtrip() {
-    assert_eq!(
-        App::split_ssh_target("abc@h:2222"),
-        ("abc".to_string(), "h".to_string(), "2222".to_string())
-    );
-    assert_eq!(
-        App::split_ssh_target("abc@h"),
-        ("abc".to_string(), "h".to_string(), String::new())
-    );
-    assert_eq!(
-        App::split_ssh_target("h"),
-        (String::new(), "h".to_string(), String::new())
-    );
-    // 往返恒等
-    for t in ["abc@h:2222", "abc@h", "h", "h:22"] {
-        let (u, h, p) = App::split_ssh_target(t);
-        assert_eq!(App::compose_ssh_target(&u, &h, &p).unwrap(), t);
+    conn.ssh_key_file = "keys/x.key".into();
+    conn.ssh_key_path = r"C:\keys\id".into();
+    data.connections.push(conn);
+    let mut config = AppConfig::defaults();
+    let mut app = App::new(&data);
+    app.handle(key(KeyCode::Char(',')), &mut data, &mut config);
+    app.handle(key(KeyCode::Enter), &mut data, &mut config);
+    app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
+    for _ in 0..ConnField::ClearKey as usize {
+        app.handle(key(KeyCode::Tab), &mut data, &mut config);
+    }
+    app.handle(key(KeyCode::Enter), &mut data, &mut config);
+    assert!(app.clear_key);
+    match &app.mode {
+        Mode::Form { fields, focus, .. } => {
+            assert_eq!(App::field_value(fields, ConnField::KeySource as usize), "");
+            assert_eq!(*focus, ConnField::KeySource as usize);
+        }
+        other => panic!("expected form, got {other:?}"),
     }
 }
 
 #[test]
-fn add_ssh_project_custom_port_via_form() {
-    // 端口预填 22：Backspace 清空后可填自定义端口。
+fn add_local_project_without_connection() {
     let _guard = crate::persist::test_env::lock_appdata();
     let temp_appdata = std::env::temp_dir().join(format!("pcs_tui_test_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp_appdata).unwrap();
@@ -805,191 +919,53 @@ fn add_ssh_project_custom_port_via_form() {
     let mut app = App::new(&data);
     app.focus = Focus::Projects;
     app.left_sel = 0;
-    app.sync_right_pane(&data);
     app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
-    for c in "srvp".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
-    // 字段 5：登录用户
-    for _ in 0..5 {
+    type_chars(&mut app, &mut data, &mut config, "srv");
+    for _ in 0..4 {
         app.handle(key(KeyCode::Tab), &mut data, &mut config);
     }
-    for c in "abc".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
-    // 字段 6：主机
-    app.handle(key(KeyCode::Tab), &mut data, &mut config);
-    for c in "h".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
-    // 字段 7：清空预填 22，改填 2222
-    app.handle(key(KeyCode::Tab), &mut data, &mut config);
-    app.handle(key(KeyCode::Backspace), &mut data, &mut config);
-    app.handle(key(KeyCode::Backspace), &mut data, &mut config);
-    for c in "2222".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
+    type_chars(&mut app, &mut data, &mut config, "/srv");
     app.handle(key(KeyCode::Enter), &mut data, &mut config);
     match &app.mode {
         Mode::Browse => {}
         other => panic!("提交成功应回浏览模式，实际 {other:?}"),
     }
     let p = &data.groups[0].projects[1];
-    assert!(p.is_ssh_project());
-    assert_eq!(p.ssh_target, "abc@h:2222");
+    assert!(!p.is_ssh_project());
+    assert!(p.connection_id.is_empty());
+    assert_eq!(p.wsl_path, "/srv");
 
     let _ = std::fs::remove_dir_all(&temp_appdata);
 }
 
 #[test]
-fn edit_ssh_project_save_unchanged_keeps_target() {
-    // 编辑表单零修改直接保存：反拆再拼接必须恒等，不改写 ssh_target。
+fn edit_ssh_project_keeps_connection_on_save() {
     let _guard = crate::persist::test_env::lock_appdata();
     let temp_appdata = std::env::temp_dir().join(format!("pcs_tui_test_{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&temp_appdata).unwrap();
     let _appdata = crate::persist::test_env::AppdataGuard::redirect(&temp_appdata);
 
     let mut data = sample();
+    let cid = seed_connection(&mut data, "lab", "abc", "h", 2222);
     {
         let p = &mut data.groups[0].projects[0];
-        p.ssh_target = "abc@h:2222".into();
+        p.connection_id = cid.clone();
         p.path = "/opt/x".into();
     }
     let mut config = AppConfig::defaults();
     let mut app = App::new(&data);
     app.focus = Focus::Projects;
     app.left_sel = 0;
-    app.sync_right_pane(&data);
     app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
-    app.handle(key(KeyCode::Enter), &mut data, &mut config);
-    match &app.mode {
-        Mode::Browse => {}
-        other => panic!("提交成功应回浏览模式，实际 {other:?}"),
-    }
-    assert_eq!(data.groups[0].projects[0].ssh_target, "abc@h:2222");
-
-    let _ = std::fs::remove_dir_all(&temp_appdata);
-}
-
-#[test]
-fn add_ssh_project_rejects_at_in_host() {
-    // 主机含 @ 时拼接失败：表单报错不关闭，不产生项目。
-    let mut data = sample();
-    let mut config = AppConfig::defaults();
-    let mut app = App::new(&data);
-    app.focus = Focus::Projects;
-    app.left_sel = 0;
-    app.sync_right_pane(&data);
-    app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
-    for c in "srv".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
-    for _ in 0..5 {
-        app.handle(key(KeyCode::Tab), &mut data, &mut config);
-    }
-    for c in "abc".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
-    app.handle(key(KeyCode::Tab), &mut data, &mut config);
-    for c in "a@h".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
-    app.handle(key(KeyCode::Enter), &mut data, &mut config);
-    match &app.mode {
-        Mode::Form { error, .. } => {
-            assert!(error.as_ref().is_some_and(|e| e.contains('@')));
-        }
-        other => panic!("应留在表单并报错，实际 {other:?}"),
-    }
-    assert_eq!(data.groups[0].projects.len(), 1);
-}
-
-#[test]
-fn edit_normal_project_converts_to_ssh_via_form() {
-    // 普通项目编辑表单填写用户/主机即转为 SSH 项目（第三条保存路径）。
-    let _guard = crate::persist::test_env::lock_appdata();
-    let temp_appdata = std::env::temp_dir().join(format!("pcs_tui_test_{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&temp_appdata).unwrap();
-    let _appdata = crate::persist::test_env::AppdataGuard::redirect(&temp_appdata);
-
-    let mut data = sample();
-    let mut config = AppConfig::defaults();
-    let mut app = App::new(&data);
-    app.focus = Focus::Projects;
-    app.left_sel = 0;
-    app.sync_right_pane(&data);
-    app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
-    // 字段 5：登录用户
-    for _ in 0..5 {
-        app.handle(key(KeyCode::Tab), &mut data, &mut config);
-    }
-    for c in "abc".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
-    // 字段 6：主机
-    app.handle(key(KeyCode::Tab), &mut data, &mut config);
-    for c in "h".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
-    // 字段 7 端口预填 22 留用；字段 8 远程路径
-    app.handle(key(KeyCode::Tab), &mut data, &mut config);
-    app.handle(key(KeyCode::Tab), &mut data, &mut config);
-    for c in "/opt/r".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
     app.handle(key(KeyCode::Enter), &mut data, &mut config);
     match &app.mode {
         Mode::Browse => {}
         other => panic!("提交成功应回浏览模式，实际 {other:?}"),
     }
     let p = &data.groups[0].projects[0];
-    assert!(p.is_ssh_project());
-    assert_eq!(p.ssh_target, "abc@h:22");
-    assert_eq!(p.path, "/opt/r");
-
-    let _ = std::fs::remove_dir_all(&temp_appdata);
-}
-
-#[test]
-fn add_project_ignores_ssh_user_when_host_empty() {
-    // 主机留空时即便填了登录用户也按普通项目保存（user 字段静默忽略）。
-    let _guard = crate::persist::test_env::lock_appdata();
-    let temp_appdata = std::env::temp_dir().join(format!("pcs_tui_test_{}", uuid::Uuid::new_v4()));
-    std::fs::create_dir_all(&temp_appdata).unwrap();
-    let _appdata = crate::persist::test_env::AppdataGuard::redirect(&temp_appdata);
-
-    let mut data = sample();
-    let mut config = AppConfig::defaults();
-    let mut app = App::new(&data);
-    app.focus = Focus::Projects;
-    app.left_sel = 0;
-    app.sync_right_pane(&data);
-    app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
-    for c in "srv".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
-    // Tab 到字段 4（WSL 路径，普通项目路径二选一）
-    for _ in 0..4 {
-        app.handle(key(KeyCode::Tab), &mut data, &mut config);
-    }
-    for c in "/srv".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
-    // 字段 5：登录用户（主机留空，应被忽略）
-    app.handle(key(KeyCode::Tab), &mut data, &mut config);
-    for c in "abc".chars() {
-        app.handle(key(KeyCode::Char(c)), &mut data, &mut config);
-    }
-    app.handle(key(KeyCode::Enter), &mut data, &mut config);
-    match &app.mode {
-        Mode::Browse => {}
-        other => panic!("提交成功应回浏览模式，实际 {other:?}"),
-    }
-    assert_eq!(data.groups[0].projects.len(), 2);
-    let p = &data.groups[0].projects[1];
-    assert!(!p.is_ssh_project());
+    assert_eq!(p.connection_id, cid);
+    assert_eq!(p.path, "/opt/x");
     assert!(p.ssh_target.is_empty());
-    assert_eq!(p.wsl_path, "/srv");
 
     let _ = std::fs::remove_dir_all(&temp_appdata);
 }

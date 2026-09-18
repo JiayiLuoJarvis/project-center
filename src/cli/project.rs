@@ -1,7 +1,8 @@
 use anyhow::{Result, bail};
 
 use crate::domain as ops;
-use crate::domain::models::{self, Project, ProjectData};
+use crate::domain::models::{self, Endpoint, Project, ProjectData, rfc3339_now};
+use crate::domain::{ConnectionPatch, KeyChange};
 use crate::launch as launcher;
 use crate::launch::LaunchEnv;
 use crate::persist as secret;
@@ -13,13 +14,11 @@ use super::common::{read_stdin_line, resolve_project_name, save, select_project}
 pub(crate) fn cmd_add(args: AddArgs) -> Result<()> {
     let mut data = Store::load();
     let mut project = if let Some(ssh_target) = args.ssh.as_deref() {
-        // SSH 远程项目：不弹目录选择器，path 复用为远程 Linux 路径。
-        let ssh_target = ssh_target.trim().to_string();
-        if ssh_target.is_empty() {
-            bail!("SSH 目标不能为空");
-        }
+        let endpoint = Endpoint::parse(ssh_target)?;
+        let now = rfc3339_now();
+        let cid = data.find_or_create_connection(&endpoint, &now);
         let ssh_path = args.ssh_path.as_deref().unwrap_or("").trim().to_string();
-        Project::new(&args.name, ssh_path, "").with_ssh_target(ssh_target)
+        Project::new(&args.name, ssh_path, "").with_connection(cid)
     } else {
         let path = match args.dir {
             Some(path) => path.to_string_lossy().trim().to_string(),
@@ -47,7 +46,7 @@ pub(crate) fn cmd_add(args: AddArgs) -> Result<()> {
         project.alias = alias.trim().to_string();
     }
     ops::add_project(&mut data, &args.group, project)?;
-    apply_ssh_secrets(
+    apply_connection_secrets(
         &mut data,
         &args.name,
         Some(&args.group),
@@ -67,34 +66,43 @@ pub(crate) fn cmd_edit(args: EditArgs) -> Result<()> {
     let mut data = Store::load();
     let (name, resolved_group) = resolve_project_name(&data, &args.name, args.group.as_deref())?;
     let group = args.group.as_deref().or(resolved_group.as_deref());
-    ops::edit_project_full(
-        &mut data,
-        &name,
-        group,
-        args.new_name.as_deref(),
-        args.alias.as_deref(),
-        path.as_deref(),
-        args.wsl_path.as_deref(),
-    )?;
+    let has_local = args.new_name.is_some()
+        || args.alias.is_some()
+        || path.is_some()
+        || args.wsl_path.is_some();
+    if has_local {
+        ops::edit_project_full(
+            &mut data,
+            &name,
+            group,
+            args.new_name.as_deref(),
+            args.alias.as_deref(),
+            path.as_deref(),
+            args.wsl_path.as_deref(),
+        )?;
+    }
     if args.clear_ssh {
         clear_project_ssh(&mut data, &name, group);
     }
     if let Some(ssh_target) = args.ssh.as_deref() {
-        let ssh_target = ssh_target.trim().to_string();
-        if ssh_target.is_empty() {
-            bail!("SSH 目标不能为空（清除 SSH 配置请用 --clear-ssh）");
+        let endpoint = Endpoint::parse(ssh_target)?;
+        let now = rfc3339_now();
+        let cid = data.find_or_create_connection(&endpoint, &now);
+        let (gi, pi) = select_project(&data, &name, group)?;
+        let remote = args
+            .ssh_path
+            .as_deref()
+            .map(|p| p.trim().to_string())
+            .unwrap_or_else(|| data.groups[gi].projects[pi].path.clone());
+        data.attach_connection(gi, pi, &cid, &remote)?;
+    } else if let Some(ssh_path) = args.ssh_path.as_deref() {
+        let (gi, pi) = select_project(&data, &name, group)?;
+        if !data.groups[gi].projects[pi].is_ssh_project() {
+            bail!("仅 SSH 项目可设置 --ssh-path");
         }
-        ops::edit_ssh_fields(&mut data, &name, group, |p| {
-            p.ssh_target = ssh_target;
-        })?;
+        data.groups[gi].projects[pi].path = ssh_path.trim().to_string();
     }
-    if let Some(ssh_path) = args.ssh_path.as_deref() {
-        let ssh_path = ssh_path.trim().to_string();
-        ops::edit_ssh_fields(&mut data, &name, group, |p| {
-            p.path = ssh_path;
-        })?;
-    }
-    apply_ssh_secrets(
+    apply_connection_secrets(
         &mut data,
         &name,
         group,
@@ -107,8 +115,8 @@ pub(crate) fn cmd_edit(args: EditArgs) -> Result<()> {
     Ok(())
 }
 
-/// 导入私钥与读入密码/口令（stdin），DPAPI 加密后写入项目。
-pub(crate) fn apply_ssh_secrets(
+/// 导入私钥与读入密码/口令，DPAPI 加密后写入项目引用的连接。
+pub(crate) fn apply_connection_secrets(
     data: &mut ProjectData,
     name: &str,
     group: Option<&str>,
@@ -116,68 +124,50 @@ pub(crate) fn apply_ssh_secrets(
     password_stdin: bool,
     key_pass_stdin: bool,
 ) -> Result<()> {
+    if ssh_key.is_none() && !password_stdin && !key_pass_stdin {
+        return Ok(());
+    }
+    let (gi, pi) = select_project(data, name, group)?;
+    let cid = data.groups[gi].projects[pi]
+        .connection_id_opt()
+        .ok_or_else(|| anyhow::anyhow!("项目不是 SSH 项目，无法写入连接秘密"))?
+        .to_string();
+    let now = rfc3339_now();
+    let mut patch = ConnectionPatch::default();
     if let Some(key_path) = ssh_key {
         let plain = std::fs::read_to_string(key_path)
             .map_err(|e| anyhow::anyhow!("读取私钥文件失败: {e}"))?;
         if plain.trim().is_empty() {
             bail!("私钥文件为空");
         }
-        let relative = {
-            let (group_index, project_index) = select_project(data, name, group)?;
-            let id = data.groups[group_index].projects[project_index].id.clone();
-            secret::write_key_file(&id, &plain).map_err(anyhow::Error::msg)?
+        let file = secret::write_key_file(&cid, &plain).map_err(anyhow::Error::msg)?;
+        patch.key = KeyChange::Import {
+            file,
+            source: key_path.to_string_lossy().into_owned(),
         };
-        let source = key_path.to_string_lossy().into_owned();
-        ops::edit_ssh_fields(data, name, group, |p| {
-            p.ssh_key_file = relative;
-            p.ssh_key_path = source;
-        })?;
     }
     if password_stdin {
         let plain = read_stdin_line("登录密码")?;
         if !plain.is_empty() {
-            let enc = secret::protect(&plain).map_err(anyhow::Error::msg)?;
-            ops::edit_ssh_fields(data, name, group, |p| {
-                p.ssh_password_enc = enc;
-            })?;
+            patch.password_enc = Some(secret::protect(&plain).map_err(anyhow::Error::msg)?);
         }
     }
     if key_pass_stdin {
         let plain = read_stdin_line("私钥口令")?;
         if !plain.is_empty() {
-            let enc = secret::protect(&plain).map_err(anyhow::Error::msg)?;
-            ops::edit_ssh_fields(data, name, group, |p| {
-                p.ssh_key_pass_enc = enc;
-            })?;
+            patch.key_pass_enc = Some(secret::protect(&plain).map_err(anyhow::Error::msg)?);
         }
     }
+    data.edit_connection(&cid, patch, &now)?;
     Ok(())
 }
 
-/// 清除项目的 SSH 配置（目标、远程路径、密钥引用与全部秘密）。
+/// 项目脱离连接（连接本身保留）。
 pub(crate) fn clear_project_ssh(data: &mut ProjectData, name: &str, group: Option<&str>) {
-    let (group_index, project_index) = match select_project(data, name, group) {
-        Ok(indexes) => indexes,
-        Err(_) => return,
+    let Ok((gi, pi)) = select_project(data, name, group) else {
+        return;
     };
-    let old_key = data.groups[group_index].projects[project_index]
-        .ssh_key_file
-        .clone();
-    if !old_key.trim().is_empty()
-        && secret::delete_key_file(&old_key).is_err()
-        && !data.pending_key_deletes.iter().any(|r| r == &old_key)
-    {
-        data.pending_key_deletes.push(old_key);
-    }
-    if let Ok(project) = ops::edit_ssh_fields(data, name, group, |p| {
-        p.ssh_target.clear();
-        p.ssh_key_file.clear();
-        p.ssh_key_path.clear();
-        p.ssh_password_enc.clear();
-        p.ssh_key_pass_enc.clear();
-    }) {
-        let _ = project;
-    }
+    data.detach_connection(gi, pi);
 }
 
 pub(crate) fn cmd_rm(args: RmArgs) -> Result<()> {
@@ -266,7 +256,7 @@ pub(crate) fn cmd_run(args: RunArgs) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::models::{Group, Project, ProjectData};
+    use crate::domain::models::{Endpoint, Group, Project, ProjectData};
 
     fn run_data() -> ProjectData {
         ProjectData {
@@ -320,5 +310,25 @@ mod tests {
         let project = &data.groups[0].projects[0];
         assert!(resolve_run_command(project, "不存在").is_err());
         assert!(resolve_run_command(&Project::new("a", "", ""), "构建").is_err());
+    }
+
+    #[test]
+    fn ssh_add_uses_connection_id_not_ssh_target() {
+        let mut data = ProjectData::default();
+        data.groups.push(Group {
+            name: "Work".into(),
+            alias: String::new(),
+            projects: Vec::new(),
+        });
+        let endpoint = Endpoint::parse("abc@h:2222").unwrap();
+        let cid = data.find_or_create_connection(&endpoint, "2026-09-18T00:00:00Z");
+        let project = Project::new("srv", "/opt/x", "").with_connection(&cid);
+        ops::add_project(&mut data, "Work", project).unwrap();
+        let p = &data.groups[0].projects[0];
+        assert_eq!(p.connection_id, cid);
+        assert!(p.ssh_target.is_empty());
+        assert_eq!(data.connections.len(), 1);
+        let again = data.find_or_create_connection(&endpoint, "2026-09-18T00:00:00Z");
+        assert_eq!(again, cid);
     }
 }

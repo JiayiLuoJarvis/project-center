@@ -103,6 +103,7 @@ pub fn remove_project_by_id(
 
 /// 定位项目并原地更新 SSH 字段；返回更新后的项目克隆。
 /// 定位支持名字 / `@<id>`（大小写不敏感、唯一前缀、分组消歧）。
+#[allow(dead_code)]
 pub fn edit_ssh_fields(
     data: &mut ProjectData,
     name: &str,

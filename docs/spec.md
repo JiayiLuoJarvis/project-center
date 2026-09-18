@@ -111,7 +111,7 @@ WSL、PowerShell 启动为「当前控制台 + 等待子进程退出（抑制 Ct
 - 查看保存的秘密：`pcs secret show <项目>` 或 TUI 中 `v`，需先 `pcs pin set` 设置 PIN（PBKDF2 校验哈希存 config.json）；`pcs pin change` 修改、`pcs pin reset --force` 重置（清空 PIN 与全部已存密码、口令、密钥文件）。
 - CLI：`pcs ssh <项目>` 直连；`pcs add/edit` 支持 `--ssh`、`--ssh-path`、`--ssh-key`（导入加密）与 `--password-stdin`、`--key-pass-stdin`（控制台输入不回显，提示语走 stderr，重定向喂入不受影响）；`pcs open -s` 等价于 SSH 启动。
 - 删除与回收站：软删保留密钥文件（可恢复）；真删（force / 回收站单项删除 / 过期清理 / 清空回收站）删除密钥文件，删除失败记入 `pendingKeyDeletes` 每次启动重试。孤儿密钥文件按 JSON 引用清理，且仅在数据非退化（非损坏兜底/备份恢复）时执行，避免误删。
-- TUI：新增/编辑项目对话框将 SSH 目标拆分为「登录用户」「主机」「端口」三字段分开填写（端口默认 22，留空用当前用户登录），保存时拼为 sshTarget；另可填写远程路径、导入密钥、密码与私钥口令（密码/口令掩码显示），一次提交完成秘密保存。
+- TUI：`,` 打开居中设置（远程连接 / 回收站 / 启动工具），左栏只列分组。项目表单用「远程连接」选择器 + 远程路径判定 SSH（不再在项目上填写 user/host/port/密码）；连接表单持有认证，支持浏览/清除密钥与 `Ctrl+U` 清空字段。
 
 ## 8. 验证
 

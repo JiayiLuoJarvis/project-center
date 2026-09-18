@@ -81,12 +81,22 @@ fn loop_ui(
                 *terminal = ratatui::try_init()?;
                 app.mode = Mode::Browse;
             }
-            Outcome::PickFolder => {
+            Outcome::PickFolder { target } => {
                 ratatui::restore();
                 let path = rfd::FileDialog::new()
                     .pick_folder()
                     .map(|p| p.to_string_lossy().trim().to_string());
-                app.resume_after_folder_pick(path);
+                app.resume_after_folder_pick(path, target);
+                *terminal = ratatui::try_init()?;
+            }
+            Outcome::PickFile { target } => {
+                ratatui::restore();
+                let path = rfd::FileDialog::new()
+                    .add_filter("所有文件", &["*"])
+                    .add_filter("私钥文件 (*.pem, *.key, *.ppk)", &["pem", "key", "ppk"])
+                    .pick_file()
+                    .map(|p| p.to_string_lossy().trim().to_string());
+                app.resume_after_file_pick(path, target);
                 *terminal = ratatui::try_init()?;
             }
         }

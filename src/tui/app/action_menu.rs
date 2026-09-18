@@ -120,12 +120,8 @@ impl App {
                     if let Some(project) = actions::find_project_ref(data, &group, &project_id) {
                         self.open_form(
                             "编辑项目",
-                            Self::project_edit_fields(project),
-                            FormKind::EditProject {
-                                group,
-                                project_id,
-                                old_name: project.name.clone(),
-                            },
+                            Self::project_fields(data, Some(project)),
+                            FormKind::EditProject { group, project_id },
                         );
                     }
                 }
@@ -206,6 +202,39 @@ impl App {
                 }
                 _ => {}
             },
+            ActionKind::Connection { id } => match selected {
+                0 => {
+                    if let Some(conn) = data.connection(&id) {
+                        self.open_form(
+                            "编辑连接",
+                            Self::connection_fields(Some(conn)),
+                            FormKind::EditConnection { id },
+                        );
+                    }
+                }
+                1 => {
+                    let refs = data.connection_refs(&id);
+                    if refs > 0 {
+                        let name = data
+                            .connection(&id)
+                            .map(|c| c.name.clone())
+                            .unwrap_or_default();
+                        self.flash(format!(
+                            "连接 `{name}` 被 {refs} 个项目引用，请先改项目或删项目"
+                        ));
+                    } else if let Some(conn) = data.connection(&id) {
+                        self.mode = Mode::Confirm {
+                            message: format!("确认删除连接 `{}`？ y/N", conn.name),
+                            kind: ConfirmKind::DeleteConnection {
+                                name: conn.name.clone(),
+                                id,
+                            },
+                        };
+                    }
+                }
+                2 => self.open_secret_viewer_for(data, config, &id),
+                _ => {}
+            },
             ActionKind::Command {
                 group,
                 project_id,
@@ -273,7 +302,13 @@ impl App {
             return Outcome::Continue;
         };
         match key.code {
-            KeyCode::Esc => self.back_to_browse(),
+            KeyCode::Esc => {
+                if let ListKind::PickConnection { suspended, .. } = kind {
+                    self.resume_form(*suspended, None, data);
+                } else {
+                    self.back_to_browse();
+                }
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 let n = items.len();
                 if n > 0 {
@@ -386,6 +421,19 @@ impl App {
                 match actions::set_default_tool(data, &project_id, &group, tool) {
                     Ok(msg) => self.flash(msg),
                     Err(e) => self.flash(e),
+                }
+            }
+            ListKind::PickConnection { ids, suspended } => {
+                if selected < ids.len() {
+                    self.resume_form(*suspended, Some(&ids[selected]), data);
+                } else {
+                    self.open_form(
+                        "新建连接",
+                        Self::connection_fields(None),
+                        FormKind::AddConnection {
+                            resume: Some(suspended),
+                        },
+                    );
                 }
             }
         }

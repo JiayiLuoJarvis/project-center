@@ -75,6 +75,15 @@ impl App {
                         Ok(msg) => self.flash(msg),
                         Err(e) => self.flash(e),
                     },
+                    ConfirmKind::DeleteConnection { id, .. } => {
+                        match actions::remove_connection(data, &id) {
+                            Ok(msg) => {
+                                self.flash(msg);
+                                self.clamp_selection(data, config);
+                            }
+                            Err(e) => self.flash(e),
+                        }
+                    }
                 }
             }
             _ => self.back_to_browse(),

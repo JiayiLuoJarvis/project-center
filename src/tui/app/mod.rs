@@ -30,6 +30,7 @@ impl App {
             exit_after_launch: false,
             short_session: false,
             quit_confirm: false,
+            clear_key: false,
         };
         app.sync_right_pane(data);
         app
@@ -64,10 +65,9 @@ impl App {
         app
     }
 
-    /// 左栏展示项：过滤后的分组下标，末尾固定回收站与配置。
+    /// 左栏只列分组（过滤后的下标）。回收站/配置改由设置弹窗进入。
     pub fn left_items(&self, data: &ProjectData) -> Vec<LeftItem> {
-        let mut items: Vec<LeftItem> = data
-            .groups
+        data.groups
             .iter()
             .enumerate()
             .filter(|(_, g)| {
@@ -77,10 +77,7 @@ impl App {
                 self.matches_filter(&g.name) || self.matches_filter(&g.alias)
             })
             .map(|(i, _)| LeftItem::Group(i))
-            .collect();
-        items.push(LeftItem::Trash);
-        items.push(LeftItem::Config);
-        items
+            .collect()
     }
 
     pub fn left_count(&self, data: &ProjectData) -> usize {
@@ -94,30 +91,18 @@ impl App {
         }
     }
 
-    pub fn left_is_trash(&self, data: &ProjectData, sel: usize) -> bool {
-        matches!(self.left_items(data).get(sel), Some(LeftItem::Trash))
-    }
-
-    pub fn left_is_config(&self, data: &ProjectData, sel: usize) -> bool {
-        matches!(self.left_items(data).get(sel), Some(LeftItem::Config))
-    }
-
-    pub fn sync_right_pane(&mut self, data: &ProjectData) {
+    pub fn sync_right_pane(&mut self, _data: &ProjectData) {
         if matches!(
             self.right_pane,
-            RightPane::Commands { .. } | RightPane::ConfigTools { .. }
+            RightPane::Commands { .. }
+                | RightPane::ConfigTools { .. }
+                | RightPane::Connections
+                | RightPane::Trash
+                | RightPane::ConfigEnvs
         ) {
             return;
         }
-        if self.left_is_trash(data, self.left_sel) {
-            self.right_pane = RightPane::Trash;
-        } else if self.left_is_config(data, self.left_sel) {
-            if !matches!(self.right_pane, RightPane::ConfigTools { .. }) {
-                self.right_pane = RightPane::ConfigEnvs;
-            }
-        } else {
-            self.right_pane = RightPane::Projects;
-        }
+        self.right_pane = RightPane::Projects;
     }
 
     pub fn clamp_selection(&mut self, data: &ProjectData, config: &AppConfig) {
@@ -140,6 +125,7 @@ impl App {
                     0
                 }
             }
+            RightPane::Connections => self.filtered_connection_indices(data).len(),
             RightPane::Trash => self.filtered_trash_indices(data).len(),
             RightPane::ConfigEnvs => 4,
             RightPane::ConfigTools { env } => self.filtered_tool_indices(config, *env).len(),
@@ -161,26 +147,49 @@ impl App {
 
     pub(crate) fn back_to_browse(&mut self) {
         self.mode = Mode::Browse;
+        self.clear_key = false;
     }
 
     pub(crate) fn pop_right_pane(&mut self, data: &ProjectData, config: &AppConfig) {
-        match &self.right_pane {
-            RightPane::ConfigTools { env } => {
-                let sel = match env {
-                    ConfigEnv::Wsl => 0,
-                    ConfigEnv::PowerShell => 1,
-                    ConfigEnv::Ide => 2,
+        match self.right_pane.parent() {
+            Some(RightPane::ConfigEnvs) => {
+                let sel = match &self.right_pane {
+                    RightPane::ConfigTools { env } => match env {
+                        ConfigEnv::Wsl => 0,
+                        ConfigEnv::PowerShell => 1,
+                        ConfigEnv::Ide => 2,
+                    },
+                    _ => 0,
                 };
                 self.right_pane = RightPane::ConfigEnvs;
                 self.right_sel = sel;
             }
-            RightPane::Commands { .. } => {
+            Some(RightPane::Projects) => {
                 self.right_pane = RightPane::Projects;
                 self.right_sel = 0;
                 self.clamp_selection(data, config);
             }
+            None if self.right_pane.is_settings_child() => {
+                let selected = self.right_pane.settings_index();
+                self.mode = Mode::SettingsMenu { selected };
+            }
             _ => {}
         }
+    }
+
+    pub(crate) fn enter_settings(&mut self) {
+        self.mode = Mode::SettingsMenu { selected: 0 };
+    }
+
+    pub(crate) fn enter_settings_child(&mut self, selected: usize) {
+        self.right_pane = match selected {
+            1 => RightPane::Trash,
+            2 => RightPane::ConfigEnvs,
+            _ => RightPane::Connections,
+        };
+        self.right_sel = 0;
+        self.focus = Focus::Projects;
+        self.mode = Mode::Browse;
     }
 
     pub fn handle(
@@ -217,6 +226,7 @@ impl App {
         }
         match self.mode.clone() {
             Mode::Browse => self.handle_browse(key, data, config),
+            Mode::SettingsMenu { .. } => self.handle_settings_menu(key),
             Mode::LaunchPicker { .. } => self.handle_launch_picker(key, data),
             Mode::ActionMenu { .. } => self.handle_action_menu(key, data, config),
             Mode::ListPicker { .. } => self.handle_list_picker(key, data, config),

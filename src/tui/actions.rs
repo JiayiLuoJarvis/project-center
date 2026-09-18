@@ -1,7 +1,9 @@
 use crate::domain as ops;
 use crate::domain::models::{
-    Project, ProjectData, format_date, is_wsl_path, normalize, win_path_to_linux,
+    Connection, Project, ProjectData, format_date, is_wsl_path, normalize, rfc3339_now,
+    win_path_to_linux,
 };
+use crate::domain::{ConnectionDraft, ConnectionPatch, KeyChange};
 use crate::launch::{LaunchOption, build_launch_options, default_first};
 use crate::persist::Store;
 use crate::persist::{
@@ -137,158 +139,190 @@ pub fn edit_project(
     Ok(format!("项目已更新: {new_name}"))
 }
 
-/// 表单提交的秘密载荷：导入密钥与加密后的密码/口令（None = 不修改/为空）。
-struct FormSecrets {
-    key_file: Option<String>,
-    key_source: String,
-    password_enc: Option<String>,
-    key_pass_enc: Option<String>,
+pub struct ProjectInput {
+    pub name: String,
+    pub alias: String,
+    pub win_path: String,
+    pub wsl_path: String,
+    pub connection_id: String,
+    pub remote_path: String,
 }
 
-/// 处理表单里的 SSH 秘密输入：密钥来源路径变化时读文件重新加密落盘，
-/// 密码/口令非空时加密。空值一律跳过（编辑语义：留空不改）。
-fn prepare_form_secrets(
+pub struct SecretInput {
+    pub key_source: String,
+    pub password: String,
+    pub key_pass: String,
+}
+
+/// 选了连接 ⇒ SSH（只写 connection_id + 远程路径）；否则本地。
+pub fn save_project(
     data: &mut ProjectData,
     group: &str,
-    project_id: &str,
-    key_source: &str,
-    password: &str,
-    key_pass: &str,
-) -> Result<FormSecrets, String> {
-    let old_key_source = find_project_ref(data, group, project_id)
-        .map(|p| p.ssh_key_path.trim().to_string())
+    existing_id: Option<&str>,
+    input: ProjectInput,
+) -> Result<String, String> {
+    let name = input.name.trim();
+    if name.is_empty() {
+        return Err("项目名不能为空".into());
+    }
+    let cid = input.connection_id.trim();
+    if !cid.is_empty() {
+        if data.connection(cid).is_none() {
+            return Err("所选远程连接不存在，请重新选择".into());
+        }
+        match existing_id {
+            Some(id) => {
+                let old_name = find_project_ref(data, group, id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| name.to_string());
+                ops::edit_project_full(
+                    data,
+                    &old_name,
+                    Some(group),
+                    Some(name),
+                    Some(input.alias.trim()),
+                    None,
+                    None,
+                )
+                .map_err(|e| e.to_string())?;
+                let (gi, pi) =
+                    ops::find_project_by_id(data, id, Some(group)).map_err(|e| e.to_string())?;
+                data.attach_connection(gi, pi, cid, &input.remote_path)
+                    .map_err(|e| e.to_string())?;
+                save_data(data)?;
+                Ok(format!("项目已更新: {name}"))
+            }
+            None => {
+                let project = Project::new(name, input.remote_path.trim(), "")
+                    .with_connection(cid)
+                    .with_alias(input.alias.trim());
+                ops::add_project(data, group, project).map_err(|e| e.to_string())?;
+                save_data(data)?;
+                Ok(format!("项目已添加: {name}"))
+            }
+        }
+    } else {
+        match existing_id {
+            Some(id) => {
+                if let Ok((gi, pi)) = ops::find_project_by_id(data, id, Some(group)) {
+                    data.detach_connection(gi, pi);
+                }
+                let old_name = find_project_ref(data, group, id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_else(|| name.to_string());
+                edit_project(
+                    data,
+                    group,
+                    &old_name,
+                    name,
+                    input.alias.trim(),
+                    input.win_path.trim(),
+                    input.wsl_path.trim(),
+                )
+            }
+            None => add_project_paths(
+                data,
+                group,
+                name,
+                input.alias.trim(),
+                input.win_path.trim(),
+                input.wsl_path.trim(),
+            ),
+        }
+    }
+}
+
+fn connection_secrets_patch(
+    data: &ProjectData,
+    connection_id: &str,
+    secrets: &SecretInput,
+    clear_key: bool,
+) -> Result<ConnectionPatch, String> {
+    let old_source = data
+        .connection(connection_id)
+        .map(|c| c.ssh_key_path.trim().to_string())
         .unwrap_or_default();
-    let source = key_source.trim().to_string();
-    let key_file = if !source.is_empty() && source != old_key_source {
+    let source = secrets.key_source.trim().to_string();
+    let key = if !source.is_empty() && source != old_source {
         let plain =
             std::fs::read_to_string(&source).map_err(|e| format!("读取私钥文件失败: {e}"))?;
         if plain.trim().is_empty() {
             return Err("私钥文件为空".into());
         }
-        Some(crate::persist::write_key_file(project_id, &plain)?)
+        let file = crate::persist::write_key_file(connection_id, &plain)?;
+        KeyChange::Import { file, source }
+    } else if clear_key && source.is_empty() {
+        KeyChange::Clear
     } else {
-        None
+        KeyChange::Keep
     };
-    let password_enc = if password.is_empty() {
-        None
-    } else {
-        Some(crate::persist::protect(password)?)
-    };
-    let key_pass_enc = if key_pass.is_empty() {
+    let password_enc = if secrets.password.is_empty() {
         None
     } else {
-        Some(crate::persist::protect(key_pass)?)
+        Some(crate::persist::protect(&secrets.password)?)
     };
-    Ok(FormSecrets {
-        key_file,
-        key_source: source,
+    let key_pass_enc = if secrets.key_pass.is_empty() {
+        None
+    } else {
+        Some(crate::persist::protect(&secrets.key_pass)?)
+    };
+    Ok(ConnectionPatch {
+        key,
         password_enc,
         key_pass_enc,
+        ..ConnectionPatch::default()
     })
 }
 
-/// 新增 SSH 远程项目（path 复用为远程 Linux 路径）。
-/// 可直接携带密钥导入与密码/口令，新增即完成秘密保存。
-#[allow(clippy::too_many_arguments)]
-pub fn add_project_ssh(
+pub fn add_connection(
     data: &mut ProjectData,
-    group: &str,
-    name: &str,
-    alias: &str,
-    ssh_target: &str,
-    ssh_path: &str,
-    key_source: &str,
-    password: &str,
-    key_pass: &str,
+    draft: ConnectionDraft,
+    secrets: SecretInput,
 ) -> Result<String, String> {
-    let name = name.trim();
-    if name.is_empty() {
-        return Err("项目名不能为空".into());
+    let now = rfc3339_now();
+    let id = data
+        .add_connection(draft, &now)
+        .map_err(|e| e.to_string())?;
+    let patch = connection_secrets_patch(data, &id, &secrets, false)?;
+    if !matches!(patch.key, KeyChange::Keep)
+        || patch.password_enc.is_some()
+        || patch.key_pass_enc.is_some()
+    {
+        data.edit_connection(&id, patch, &now)
+            .map_err(|e| e.to_string())?;
     }
-    let target = ssh_target.trim();
-    if target.is_empty() {
-        return Err("SSH 目标不能为空".into());
-    }
-    let mut project = Project::new(name, ssh_path.trim(), "");
-    project.ssh_target = target.to_string();
-    project.alias = alias.trim().to_string();
-    let project_id = project.id.clone();
-    // 先处理秘密再入表：add_project 失败（重名等）时不产生半成品项目；
-    // 此时已落盘的密钥文件成为孤儿，由启动维护的引用驱动清理兜底。
-    let secrets = prepare_form_secrets(data, group, &project_id, key_source, password, key_pass)?;
-    ops::add_project(data, group, project).map_err(|e| e.to_string())?;
-    ops::edit_ssh_fields(data, &format!("@{project_id}"), Some(group), |p| {
-        if let Some(relative) = &secrets.key_file {
-            p.ssh_key_file = relative.clone();
-            p.ssh_key_path = secrets.key_source.clone();
-        }
-        if let Some(enc) = &secrets.password_enc {
-            p.ssh_password_enc = enc.clone();
-        }
-        if let Some(enc) = &secrets.key_pass_enc {
-            p.ssh_key_pass_enc = enc.clone();
-        }
-    })
-    .map_err(|e| e.to_string())?;
     save_data(data)?;
-    Ok(format!("项目已添加: {name}"))
+    Ok(id)
 }
 
-/// 把普通项目转为 SSH 项目 / 更新 SSH 目标与远程路径。
-pub fn set_ssh_target(
+pub fn edit_connection(
     data: &mut ProjectData,
-    group: &str,
-    project_id: &str,
-    ssh_target: &str,
-    ssh_path: &str,
+    id: &str,
+    draft: ConnectionDraft,
+    secrets: SecretInput,
+    clear_key: bool,
 ) -> Result<String, String> {
-    let target = ssh_target.trim().to_string();
-    if target.is_empty() {
-        return Err("SSH 目标不能为空".into());
-    }
-    ops::edit_ssh_fields(data, &format!("@{project_id}"), Some(group), |p| {
-        p.ssh_target = target;
-        p.path = ssh_path.trim().to_string();
-    })
-    .map_err(|e| e.to_string())?;
+    let now = rfc3339_now();
+    let mut patch = connection_secrets_patch(data, id, &secrets, clear_key)?;
+    patch.name = Some(draft.name);
+    patch.user = Some(draft.user);
+    patch.host = Some(draft.host);
+    patch.port = Some(draft.port);
+    data.edit_connection(id, patch, &now)
+        .map_err(|e| e.to_string())?;
     save_data(data)?;
-    Ok("项目已更新".into())
+    Ok("连接已更新".into())
 }
 
-/// SSH 项目编辑：目标/远程路径/密钥导入/密码口令（留空不改）。
-#[allow(clippy::too_many_arguments)]
-pub fn edit_project_ssh(
-    data: &mut ProjectData,
-    group: &str,
-    project_id: &str,
-    ssh_target: &str,
-    ssh_path: &str,
-    key_source: &str,
-    password: &str,
-    key_pass: &str,
-) -> Result<String, String> {
-    let target = ssh_target.trim();
-    if target.is_empty() {
-        return Err("SSH 目标不能为空".into());
-    }
-    let secrets = prepare_form_secrets(data, group, project_id, key_source, password, key_pass)?;
-    ops::edit_ssh_fields(data, &format!("@{project_id}"), Some(group), |p| {
-        p.ssh_target = target.to_string();
-        p.path = ssh_path.trim().to_string();
-        if let Some(relative) = &secrets.key_file {
-            p.ssh_key_file = relative.clone();
-            p.ssh_key_path = secrets.key_source.clone();
-        }
-        if let Some(enc) = &secrets.password_enc {
-            p.ssh_password_enc = enc.clone();
-        }
-        if let Some(enc) = &secrets.key_pass_enc {
-            p.ssh_key_pass_enc = enc.clone();
-        }
-    })
-    .map_err(|e| e.to_string())?;
+pub fn remove_connection(data: &mut ProjectData, id: &str) -> Result<String, String> {
+    let removed = data.remove_connection(id).map_err(|e| e.to_string())?;
+    ops::drop_key_file(data, &removed.ssh_key_file);
     save_data(data)?;
-    Ok("项目已更新".into())
+    Ok(format!("连接已删除: {}", removed.name))
+}
+
+pub fn connection_label(conn: &Connection, refs: usize) -> String {
+    format!("{}  {}  ({refs} 项目)", conn.name, conn.label())
 }
 
 pub fn remove_project(

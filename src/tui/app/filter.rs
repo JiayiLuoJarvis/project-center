@@ -14,7 +14,6 @@ impl App {
             .into_iter()
             .filter_map(|item| match item {
                 LeftItem::Group(i) => Some(i),
-                _ => None,
             })
             .collect()
     }
@@ -43,6 +42,22 @@ impl App {
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    pub fn filtered_connection_indices(&self, data: &ProjectData) -> Vec<usize> {
+        data.connections
+            .iter()
+            .enumerate()
+            .filter(|(_, conn)| {
+                if self.focus != Focus::Projects || self.filter.is_empty() {
+                    return true;
+                }
+                self.matches_filter(&conn.name)
+                    || self.matches_filter(&conn.label())
+                    || self.matches_filter(&conn.host)
+            })
+            .map(|(i, _)| i)
+            .collect()
     }
 
     pub fn filtered_trash_indices(&self, data: &ProjectData) -> Vec<usize> {
@@ -138,13 +153,11 @@ impl App {
         Outcome::Continue
     }
 
-    /// 过滤视图中左栏选中项在完整列表中的下标；
-    /// 回收站与配置固定在末尾，无匹配时回退到回收站。
+    /// 过滤视图中左栏选中项在完整列表中的下标。
     pub(crate) fn map_left_selection(&self, data: &ProjectData) -> usize {
         match self.left_items(data).get(self.left_sel) {
             Some(LeftItem::Group(gi)) => *gi,
-            Some(LeftItem::Config) => data.groups.len() + 1,
-            _ => data.groups.len(),
+            None => 0,
         }
     }
 
@@ -161,6 +174,10 @@ impl App {
                     .get(self.right_sel)
                     .copied()
             }),
+            RightPane::Connections => self
+                .filtered_connection_indices(data)
+                .get(self.right_sel)
+                .copied(),
             RightPane::Trash => self
                 .filtered_trash_indices(data)
                 .get(self.right_sel)

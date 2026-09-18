@@ -12,6 +12,10 @@ impl App {
                 self.quit_confirm = true;
                 return Outcome::Continue;
             }
+            KeyCode::Char(',') => {
+                self.enter_settings();
+                return Outcome::Continue;
+            }
             KeyCode::Char('?') => {
                 self.mode = Mode::Help;
                 return Outcome::Continue;
@@ -121,7 +125,11 @@ impl App {
             self.right_sel = 0;
             if matches!(
                 self.right_pane,
-                RightPane::Commands { .. } | RightPane::ConfigTools { .. }
+                RightPane::Commands { .. }
+                    | RightPane::ConfigTools { .. }
+                    | RightPane::Connections
+                    | RightPane::Trash
+                    | RightPane::ConfigEnvs
             ) {
                 self.right_pane = RightPane::Projects;
             }
@@ -152,6 +160,9 @@ impl App {
                         self.open_launch_picker(data, config, &group, &id);
                     }
                 }
+            }
+            RightPane::Connections => {
+                self.open_action_menu(data, config);
             }
             RightPane::Trash => {
                 self.open_action_menu(data, config);
@@ -214,6 +225,22 @@ impl App {
             return;
         }
         match self.right_pane.clone() {
+            RightPane::Connections => {
+                let Some(id) = self.selected_connection_id(data) else {
+                    self.flash("无选中连接");
+                    return;
+                };
+                self.mode = Mode::ActionMenu {
+                    kind: ActionKind::Connection { id },
+                    items: vec![
+                        "编辑".into(),
+                        "删除".into(),
+                        "查看秘密".into(),
+                        "返回".into(),
+                    ],
+                    selected: 0,
+                };
+            }
             RightPane::Projects => {
                 if let Some(gi) = self.left_is_group(data, self.left_sel) {
                     let indices = self.filtered_project_indices(data, gi);
@@ -296,12 +323,19 @@ impl App {
             return;
         }
         match self.right_pane.clone() {
+            RightPane::Connections => {
+                self.open_form(
+                    "新建连接",
+                    Self::connection_fields(None),
+                    FormKind::AddConnection { resume: None },
+                );
+            }
             RightPane::Projects => {
                 if let Some(gi) = self.left_is_group(data, self.left_sel) {
                     let group = data.groups[gi].name.clone();
                     self.open_form(
                         "新增项目",
-                        Self::project_add_fields(),
+                        Self::project_fields(data, None),
                         FormKind::AddProject { group },
                     );
                 }
@@ -352,6 +386,19 @@ impl App {
             return;
         }
         match self.right_pane.clone() {
+            RightPane::Connections => {
+                let Some(id) = self.selected_connection_id(data) else {
+                    return;
+                };
+                let Some(conn) = data.connection(&id) else {
+                    return;
+                };
+                self.open_form(
+                    "编辑连接",
+                    Self::connection_fields(Some(conn)),
+                    FormKind::EditConnection { id },
+                );
+            }
             RightPane::Projects => {
                 if let Some(gi) = self.left_is_group(data, self.left_sel) {
                     let indices = self.filtered_project_indices(data, gi);
@@ -361,11 +408,10 @@ impl App {
                     let p = &data.groups[gi].projects[pi];
                     self.open_form(
                         "编辑项目",
-                        Self::project_edit_fields(p),
+                        Self::project_fields(data, Some(p)),
                         FormKind::EditProject {
                             group: data.groups[gi].name.clone(),
                             project_id: p.id.clone(),
-                            old_name: p.name.clone(),
                         },
                     );
                 }
@@ -433,6 +479,29 @@ impl App {
             return;
         }
         match self.right_pane.clone() {
+            RightPane::Connections => {
+                let Some(id) = self.selected_connection_id(data) else {
+                    return;
+                };
+                let Some(conn) = data.connection(&id) else {
+                    return;
+                };
+                let refs = data.connection_refs(&id);
+                if refs > 0 {
+                    self.flash(format!(
+                        "连接 `{}` 被 {refs} 个项目引用，请先改项目或删项目",
+                        conn.name
+                    ));
+                    return;
+                }
+                self.mode = Mode::Confirm {
+                    message: format!("确认删除连接 `{}`？ y/N", conn.name),
+                    kind: ConfirmKind::DeleteConnection {
+                        id,
+                        name: conn.name.clone(),
+                    },
+                };
+            }
             RightPane::Projects => {
                 if let Some(gi) = self.left_is_group(data, self.left_sel) {
                     let indices = self.filtered_project_indices(data, gi);
@@ -553,5 +622,39 @@ impl App {
             }
             Err(e) => self.flash(e),
         }
+    }
+
+    pub(crate) fn selected_connection_id(&self, data: &ProjectData) -> Option<String> {
+        self.filtered_connection_indices(data)
+            .get(self.right_sel)
+            .and_then(|&i| data.connections.get(i))
+            .map(|conn| conn.id.clone())
+    }
+
+    pub(crate) fn handle_settings_menu(&mut self, key: KeyEvent) -> Outcome {
+        let Mode::SettingsMenu { selected } = self.mode else {
+            return Outcome::Continue;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.right_pane = RightPane::Projects;
+                self.back_to_browse();
+            }
+            KeyCode::Char('j') | KeyCode::Down => {
+                let n = SETTINGS_ITEMS.len();
+                self.mode = Mode::SettingsMenu {
+                    selected: (selected + 1) % n,
+                };
+            }
+            KeyCode::Char('k') | KeyCode::Up => {
+                let n = SETTINGS_ITEMS.len();
+                self.mode = Mode::SettingsMenu {
+                    selected: (selected + n - 1) % n,
+                };
+            }
+            KeyCode::Enter => self.enter_settings_child(selected),
+            _ => {}
+        }
+        Outcome::Continue
     }
 }

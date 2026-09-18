@@ -1,3 +1,6 @@
+use crate::domain::models::Connection;
+use crate::tui::actions::{ProjectInput, SecretInput};
+
 use super::*;
 
 impl App {
@@ -8,10 +11,6 @@ impl App {
         }
     }
 
-    pub(crate) fn password_field(label: &str) -> FormField {
-        Self::password_field_with_hint(label, "（未设置）")
-    }
-
     pub(crate) fn password_field_with_hint(label: &str, empty_hint: &str) -> FormField {
         FormField::Password {
             label: label.into(),
@@ -20,9 +19,22 @@ impl App {
         }
     }
 
-    pub(crate) fn button_field(label: &str) -> FormField {
+    pub(crate) fn button_field(label: &str, action: ButtonAction) -> FormField {
         FormField::Button {
             label: label.into(),
+            action,
+        }
+    }
+
+    pub(crate) fn select_field(
+        label: &str,
+        display: impl Into<String>,
+        value: impl Into<String>,
+    ) -> FormField {
+        FormField::Select {
+            label: label.into(),
+            display: display.into(),
+            value: value.into(),
         }
     }
 
@@ -32,6 +44,7 @@ impl App {
         fields: Vec<FormField>,
         kind: FormKind,
     ) {
+        self.clear_key = false;
         self.mode = Mode::Form {
             title: title.into(),
             fields,
@@ -41,123 +54,116 @@ impl App {
         };
     }
 
-    /// 基础表单字段索引：0 项目名 / 1 别名 / 2 Windows 路径 / 3 浏览按钮 /
-    /// 4 WSL 路径 / 5 登录用户 / 6 主机 / 7 端口 / 8 远程 Linux 路径。
-    pub(crate) fn project_form_fields(
-        name: &str,
-        alias: &str,
-        path: &str,
-        wsl_path: &str,
-    ) -> Vec<FormField> {
+    /// 新增/编辑同一布局：本地路径 + 远程连接 + 远程路径。
+    pub(crate) fn project_fields(data: &ProjectData, p: Option<&Project>) -> Vec<FormField> {
+        let (name, alias, path, wsl, cid, remote) = match p {
+            Some(p) if p.is_ssh_project() => (
+                p.name.as_str(),
+                p.alias.as_str(),
+                "",
+                "",
+                p.connection_id.trim(),
+                p.path.as_str(),
+            ),
+            Some(p) => (
+                p.name.as_str(),
+                p.alias.as_str(),
+                p.path.as_str(),
+                p.wsl_path.as_str(),
+                "",
+                "",
+            ),
+            None => ("", "", "", "", "", ""),
+        };
+        let (display, value) = if cid.is_empty() {
+            ("（未选择）".to_string(), String::new())
+        } else if let Some(conn) = data.connection(cid) {
+            (format!("{}  {}", conn.name, conn.label()), conn.id.clone())
+        } else {
+            ("（连接缺失，请重选）".to_string(), cid.to_string())
+        };
         vec![
             Self::text_field("项目名", name),
             Self::text_field("别名", alias),
             Self::text_field("Windows 路径", path),
-            Self::button_field("浏览文件夹…"),
-            Self::text_field("WSL 路径", wsl_path),
-            Self::text_field("登录用户（SSH 项目，可选，留空用当前用户）", ""),
-            Self::text_field("主机（SSH 项目，仅域名/IPv4，留空为普通项目）", ""),
-            Self::text_field("端口（SSH 项目，默认 22）", "22"),
-            Self::text_field("远程 Linux 路径", ""),
+            Self::button_field(
+                "浏览文件夹…",
+                ButtonAction::PickFolder {
+                    target: ProjectField::WinPath as usize,
+                },
+            ),
+            Self::text_field("WSL 路径", wsl),
+            Self::select_field("远程连接", display, value),
+            Self::text_field("远程路径", remote),
         ]
     }
 
-    /// 新增表单：基础字段 + SSH 秘密字段（9 密钥来源 / 10 密码 / 11 口令，
-    /// 仅主机非空时生效），新增即可直接保存秘密，无需二次编辑。
-    pub(crate) fn project_add_fields() -> Vec<FormField> {
-        let mut fields = Self::project_form_fields("", "", "", "");
-        fields.push(Self::text_field("私钥来源路径（SSH 项目，可选）", ""));
-        fields.push(Self::password_field("登录密码（SSH 项目，可选）"));
-        fields.push(Self::password_field("私钥口令（SSH 项目，可选）"));
-        fields
-    }
-
-    /// 编辑表单：SSH 项目用 SSH 专用字段；普通项目附 SSH 转换字段。
-    /// SSH 表单字段索引：0 登录用户 / 1 主机 / 2 端口 / 3 远程路径 /
-    /// 4 密钥来源 / 5 密码 / 6 口令。
-    pub(crate) fn project_edit_fields(p: &Project) -> Vec<FormField> {
-        if p.is_ssh_project() {
-            let (user, host, port) = Self::split_ssh_target(&p.ssh_target);
-            // 密码框恒为空值（留空不改语义）：label 简短，空值占位用 empty_hint
-            // 标明已存/未存，避免值行被画成「未设置」与「已保存」矛盾。
-            let (pw_label, pw_hint) = if p.ssh_password_enc.trim().is_empty() {
-                ("登录密码", "（未设置）")
-            } else {
-                ("登录密码", "（已保存，留空不改）")
-            };
-            let (kp_label, kp_hint) = if p.ssh_key_pass_enc.trim().is_empty() {
-                ("私钥口令", "（未设置）")
-            } else {
-                ("私钥口令", "（已保存，留空不改）")
-            };
-            return vec![
-                Self::text_field("登录用户（留空用当前用户）", &user),
-                Self::text_field("主机（域名/IPv4）", &host),
-                Self::text_field("端口（默认 22）", &port),
-                Self::text_field("远程 Linux 路径", &p.path),
-                Self::text_field("私钥来源路径（填路径导入替换，留空不变）", &p.ssh_key_path),
-                Self::password_field_with_hint(pw_label, pw_hint),
-                Self::password_field_with_hint(kp_label, kp_hint),
-            ];
-        }
-        let mut fields = Self::project_form_fields(&p.name, &p.alias, &p.path, &p.wsl_path);
-        fields[5] = Self::text_field("登录用户（填主机后生效，留空用当前用户）", "");
-        fields[6] = Self::text_field("主机（填入即转为 SSH 项目）", "");
-        fields[7] = Self::text_field("端口（填主机后生效，默认 22）", "22");
-        fields
+    pub(crate) fn connection_fields(conn: Option<&Connection>) -> Vec<FormField> {
+        let (name, user, host, port, key_path) = match conn {
+            Some(c) => (
+                c.name.as_str(),
+                c.user.as_str(),
+                c.host.as_str(),
+                c.port.to_string(),
+                c.ssh_key_path.as_str(),
+            ),
+            None => ("", "", "", "22".into(), ""),
+        };
+        let (pw_hint, kp_hint) = match conn {
+            Some(c) if !c.ssh_password_enc.trim().is_empty() => (
+                "（已保存，留空不改）",
+                password_hint(c.ssh_key_pass_enc.trim().is_empty()),
+            ),
+            Some(c) => (
+                "（未设置）",
+                password_hint(c.ssh_key_pass_enc.trim().is_empty()),
+            ),
+            None => ("（未设置）", "（未设置）"),
+        };
+        vec![
+            Self::text_field("名称", name),
+            Self::text_field("登录用户（可选，留空用当前用户）", user),
+            Self::text_field("主机", host),
+            Self::text_field("端口（默认 22）", port.as_str()),
+            Self::text_field("私钥来源路径（可选）", key_path),
+            Self::button_field(
+                "浏览私钥文件…",
+                ButtonAction::PickFile {
+                    target: ConnField::KeySource as usize,
+                },
+            ),
+            Self::button_field(
+                "清除已导入密钥",
+                ButtonAction::ClearKey {
+                    target: ConnField::KeySource as usize,
+                },
+            ),
+            Self::password_field_with_hint("登录密码", pw_hint),
+            Self::password_field_with_hint("私钥口令", kp_hint),
+        ]
     }
 
     pub(crate) fn field_value(fields: &[FormField], index: usize) -> String {
         match fields.get(index) {
-            Some(FormField::Text { value, .. } | FormField::Password { value, .. }) => {
-                value.clone()
-            }
+            Some(
+                FormField::Text { value, .. }
+                | FormField::Password { value, .. }
+                | FormField::Select { value, .. },
+            ) => value.clone(),
             _ => String::new(),
         }
     }
 
-    /// 拼接 SSH 目标：`[user@]host[:port]`。user/host 禁止含 `@`（防拼出
-    /// `a@b@c` 这类坏目标）；port 非空时必须为纯数字，留空即 ssh 默认 22。
-    pub(crate) fn compose_ssh_target(user: &str, host: &str, port: &str) -> Result<String, String> {
-        let user = user.trim();
-        let host = host.trim();
-        let port = port.trim();
-        if user.contains('@') {
-            return Err("登录用户不要包含 @".into());
+    fn set_select(fields: &mut [FormField], index: usize, value: String, display: String) {
+        if let Some(FormField::Select {
+            value: slot,
+            display: shown,
+            ..
+        }) = fields.get_mut(index)
+        {
+            *slot = value;
+            *shown = display;
         }
-        if host.contains('@') {
-            return Err("主机不要包含 @，用户名请填在“登录用户”字段".into());
-        }
-        if !port.is_empty() && !port.bytes().all(|b| b.is_ascii_digit()) {
-            return Err("端口必须是纯数字".into());
-        }
-        let mut target = String::new();
-        if !user.is_empty() {
-            target.push_str(user);
-            target.push('@');
-        }
-        target.push_str(host);
-        if !port.is_empty() {
-            target.push(':');
-            target.push_str(port);
-        }
-        Ok(target)
-    }
-
-    /// 反拆已存 SSH 目标为（用户， 主机， 端口），供编辑表单预填；
-    /// 缺失部分为空串（与 `compose_ssh_target` 互为不动点）。
-    pub(crate) fn split_ssh_target(target: &str) -> (String, String, String) {
-        let target = target.trim();
-        let (user, rest) = match target.split_once('@') {
-            Some((u, r)) => (u, r),
-            None => ("", target),
-        };
-        let (host, port) = crate::launch::split_host_port(rest);
-        (
-            user.to_string(),
-            host.to_string(),
-            port.unwrap_or_default().to_string(),
-        )
     }
 
     pub(crate) fn set_form_error(&mut self, error: impl Into<String>) {
@@ -166,7 +172,52 @@ impl App {
         }
     }
 
-    /// 打开「查看保存的秘密」对话框（仅 SSH 项目且已存秘密、已设 PIN）。
+    pub(crate) fn open_connection_picker(&mut self, data: &ProjectData, suspended: SuspendedForm) {
+        let ids: Vec<String> = data.connections.iter().map(|c| c.id.clone()).collect();
+        let mut items: Vec<String> = data
+            .connections
+            .iter()
+            .map(|c| format!("{}  {}", c.name, c.label()))
+            .collect();
+        items.push(NEW_CONNECTION_LABEL.into());
+        self.mode = Mode::ListPicker {
+            title: "选择远程连接".into(),
+            items,
+            selected: 0,
+            kind: ListKind::PickConnection {
+                ids,
+                suspended: Box::new(suspended),
+            },
+        };
+    }
+
+    pub(crate) fn resume_form(
+        &mut self,
+        mut suspended: SuspendedForm,
+        picked: Option<&str>,
+        data: &ProjectData,
+    ) {
+        if let Some(id) = picked {
+            let display = data
+                .connection(id)
+                .map(|c| format!("{}  {}", c.name, c.label()))
+                .unwrap_or_else(|| id.to_string());
+            Self::set_select(
+                &mut suspended.fields,
+                ProjectField::Connection as usize,
+                id.to_string(),
+                display,
+            );
+        }
+        self.mode = Mode::Form {
+            title: suspended.title,
+            fields: suspended.fields,
+            focus: suspended.focus,
+            kind: suspended.kind,
+            error: None,
+        };
+    }
+
     pub(crate) fn handle_form(
         &mut self,
         key: KeyEvent,
@@ -191,7 +242,14 @@ impl App {
 
         match key.code {
             KeyCode::Esc => {
-                self.back_to_browse();
+                if let FormKind::AddConnection {
+                    resume: Some(suspended),
+                } = kind
+                {
+                    self.open_connection_picker(data, *suspended);
+                } else {
+                    self.back_to_browse();
+                }
                 return Outcome::Continue;
             }
             KeyCode::Tab | KeyCode::Down => {
@@ -215,10 +273,36 @@ impl App {
                 };
             }
             KeyCode::Backspace => {
-                if let Some(FormField::Text { value, .. } | FormField::Password { value, .. }) =
-                    fields.get_mut(focus)
-                {
-                    value.pop();
+                match fields.get_mut(focus) {
+                    Some(FormField::Text { value, .. } | FormField::Password { value, .. }) => {
+                        value.pop();
+                    }
+                    Some(FormField::Select { value, display, .. }) => {
+                        value.clear();
+                        *display = "（未选择）".into();
+                    }
+                    _ => {}
+                }
+                self.mode = Mode::Form {
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    error: None,
+                };
+            }
+            KeyCode::Char('u') | KeyCode::Char('U')
+                if key.modifiers.contains(KeyModifiers::CONTROL) =>
+            {
+                match fields.get_mut(focus) {
+                    Some(FormField::Text { value, .. } | FormField::Password { value, .. }) => {
+                        value.clear();
+                    }
+                    Some(FormField::Select { value, display, .. }) => {
+                        value.clear();
+                        *display = "（未选择）".into();
+                    }
+                    _ => {}
                 }
                 self.mode = Mode::Form {
                     title,
@@ -243,15 +327,53 @@ impl App {
                 };
             }
             KeyCode::Enter => match fields.get(focus) {
-                Some(FormField::Button { .. }) => {
-                    self.mode = Mode::Form {
+                Some(FormField::Select { .. }) => {
+                    let suspended = SuspendedForm {
                         title,
                         fields,
                         focus,
                         kind,
-                        error: None,
                     };
-                    return Outcome::PickFolder;
+                    self.open_connection_picker(data, suspended);
+                    return Outcome::Continue;
+                }
+                Some(FormField::Button { action, .. }) => {
+                    let action = *action;
+                    match action {
+                        ButtonAction::ClearKey { target } => {
+                            if let Some(FormField::Text { value, .. }) = fields.get_mut(target) {
+                                value.clear();
+                            }
+                            self.clear_key = true;
+                            self.mode = Mode::Form {
+                                title,
+                                fields,
+                                focus: target,
+                                kind,
+                                error: None,
+                            };
+                        }
+                        ButtonAction::PickFolder { target } => {
+                            self.mode = Mode::Form {
+                                title,
+                                fields,
+                                focus,
+                                kind,
+                                error: None,
+                            };
+                            return Outcome::PickFolder { target };
+                        }
+                        ButtonAction::PickFile { target } => {
+                            self.mode = Mode::Form {
+                                title,
+                                fields,
+                                focus,
+                                kind,
+                                error: None,
+                            };
+                            return Outcome::PickFile { target };
+                        }
+                    }
                 }
                 _ => {
                     self.mode = Mode::Form {
@@ -284,110 +406,37 @@ impl App {
         data: &mut ProjectData,
         config: &mut AppConfig,
     ) -> Outcome {
-        let result = match kind {
+        match kind {
             FormKind::AddGroup => {
                 let name = Self::field_value(fields, 0);
                 let alias = Self::field_value(fields, 1);
-                actions::add_group(data, &name, &alias).inspect(|_| {
+                let result = actions::add_group(data, &name, &alias);
+                if result.is_ok() {
                     self.left_sel = data.groups.len().saturating_sub(1);
+                    self.right_pane = RightPane::Projects;
                     self.sync_right_pane(data);
-                })
+                }
+                self.finish_submit(result);
             }
             FormKind::RenameGroup { old } => {
                 let name = Self::field_value(fields, 0);
                 let alias = Self::field_value(fields, 1);
-                actions::rename_group(data, &old, &name, &alias)
+                self.finish_submit(actions::rename_group(data, &old, &name, &alias));
             }
             FormKind::AddProject { group } => {
-                let name = Self::field_value(fields, 0);
-                let alias = Self::field_value(fields, 1);
-                // 基础表单索引：5 用户 / 6 主机 / 7 端口 / 8 远程路径 /
-                // 9 密钥来源 / 10 密码 / 11 口令
-                let ssh_host = Self::field_value(fields, 6);
-                if !ssh_host.trim().is_empty() {
-                    let ssh_user = Self::field_value(fields, 5);
-                    let ssh_port = Self::field_value(fields, 7);
-                    let remote = Self::field_value(fields, 8);
-                    let key_source = Self::field_value(fields, 9);
-                    let password = Self::field_value(fields, 10);
-                    let key_pass = Self::field_value(fields, 11);
-                    match Self::compose_ssh_target(&ssh_user, &ssh_host, &ssh_port) {
-                        Ok(ssh_target) => actions::add_project_ssh(
-                            data,
-                            &group,
-                            &name,
-                            &alias,
-                            &ssh_target,
-                            &remote,
-                            &key_source,
-                            &password,
-                            &key_pass,
-                        ),
-                        Err(e) => Err(e),
-                    }
-                } else {
-                    let path = Self::field_value(fields, 2);
-                    let wsl = Self::field_value(fields, 4);
-                    actions::add_project_paths(data, &group, &name, &alias, &path, &wsl)
-                }
+                let input = project_input(fields);
+                self.finish_submit(actions::save_project(data, &group, None, input));
             }
             FormKind::EditProject {
-                group,
-                project_id,
-                old_name,
+                group, project_id, ..
             } => {
-                let is_ssh = actions::find_project_ref(data, &group, &project_id)
-                    .map(|p| p.is_ssh_project())
-                    .unwrap_or(false);
-                if is_ssh {
-                    // SSH 编辑表单：0 用户 1 主机 2 端口 3 远程路径 4 密钥来源 5 密码 6 口令
-                    let ssh_user = Self::field_value(fields, 0);
-                    let ssh_host = Self::field_value(fields, 1);
-                    let ssh_port = Self::field_value(fields, 2);
-                    let remote = Self::field_value(fields, 3);
-                    let key_source = Self::field_value(fields, 4);
-                    let password = Self::field_value(fields, 5);
-                    let key_pass = Self::field_value(fields, 6);
-                    match Self::compose_ssh_target(&ssh_user, &ssh_host, &ssh_port) {
-                        Ok(target) => actions::edit_project_ssh(
-                            data,
-                            &group,
-                            &project_id,
-                            &target,
-                            &remote,
-                            &key_source,
-                            &password,
-                            &key_pass,
-                        ),
-                        Err(e) => Err(e),
-                    }
-                } else {
-                    let name = Self::field_value(fields, 0);
-                    let alias = Self::field_value(fields, 1);
-                    let path = Self::field_value(fields, 2);
-                    let wsl = Self::field_value(fields, 4);
-                    let base =
-                        actions::edit_project(data, &group, &old_name, &name, &alias, &path, &wsl);
-                    // 普通项目表单填了主机即转换为 SSH 项目
-                    let ssh_host = Self::field_value(fields, 6);
-                    if base.is_ok() && !ssh_host.trim().is_empty() {
-                        let ssh_user = Self::field_value(fields, 5);
-                        let ssh_port = Self::field_value(fields, 7);
-                        let remote = Self::field_value(fields, 8);
-                        match Self::compose_ssh_target(&ssh_user, &ssh_host, &ssh_port) {
-                            Ok(ssh_target) => actions::set_ssh_target(
-                                data,
-                                &group,
-                                &project_id,
-                                &ssh_target,
-                                &remote,
-                            ),
-                            Err(e) => Err(e),
-                        }
-                    } else {
-                        base
-                    }
-                }
+                let input = project_input(fields);
+                self.finish_submit(actions::save_project(
+                    data,
+                    &group,
+                    Some(&project_id),
+                    input,
+                ));
             }
             FormKind::AddCommand {
                 group,
@@ -396,7 +445,14 @@ impl App {
             } => {
                 let name = Self::field_value(fields, 0);
                 let command = Self::field_value(fields, 1);
-                actions::add_command(data, &project_id, &group, &name, &env, &command)
+                self.finish_submit(actions::add_command(
+                    data,
+                    &project_id,
+                    &group,
+                    &name,
+                    &env,
+                    &command,
+                ));
             }
             FormKind::EditCommand {
                 group,
@@ -406,20 +462,60 @@ impl App {
             } => {
                 let name = Self::field_value(fields, 0);
                 let command = Self::field_value(fields, 1);
-                actions::edit_command(data, &project_id, &group, index, &name, &env, &command)
+                self.finish_submit(actions::edit_command(
+                    data,
+                    &project_id,
+                    &group,
+                    index,
+                    &name,
+                    &env,
+                    &command,
+                ));
             }
             FormKind::AddTool { env } => {
                 let name = Self::field_value(fields, 0);
                 let command = Self::field_value(fields, 1);
-                actions::add_config_tool(config, env, &name, &command)
+                self.finish_submit(actions::add_config_tool(config, env, &name, &command));
             }
             FormKind::EditTool { env, index } => {
                 let name = Self::field_value(fields, 0);
                 let command = Self::field_value(fields, 1);
-                actions::edit_config_tool(config, env, index, &name, &command)
+                self.finish_submit(actions::edit_config_tool(
+                    config, env, index, &name, &command,
+                ));
             }
-        };
+            FormKind::AddConnection { resume } => {
+                let draft = connection_draft(fields);
+                let secrets = secret_input(fields);
+                match actions::add_connection(data, draft, secrets) {
+                    Ok(id) => match resume {
+                        Some(suspended) => {
+                            self.resume_form(*suspended, Some(&id), data);
+                        }
+                        None => {
+                            self.back_to_browse();
+                            self.flash("连接已添加");
+                        }
+                    },
+                    Err(e) => self.set_form_error(e),
+                }
+            }
+            FormKind::EditConnection { id } => {
+                let draft = connection_draft(fields);
+                let secrets = secret_input(fields);
+                self.finish_submit(actions::edit_connection(
+                    data,
+                    &id,
+                    draft,
+                    secrets,
+                    self.clear_key,
+                ));
+            }
+        }
+        Outcome::Continue
+    }
 
+    fn finish_submit(&mut self, result: Result<String, String>) {
         match result {
             Ok(msg) => {
                 self.back_to_browse();
@@ -427,10 +523,9 @@ impl App {
             }
             Err(e) => self.set_form_error(e),
         }
-        Outcome::Continue
     }
 
-    pub fn resume_after_folder_pick(&mut self, path: Option<String>) {
+    pub fn resume_after_folder_pick(&mut self, path: Option<String>, target: usize) {
         let Mode::Form {
             title,
             mut fields,
@@ -443,24 +538,30 @@ impl App {
         };
         match path {
             Some(path) => {
-                // 项目表单：0 名 1 别名 2 Windows 路径 3 浏览 4 WSL
-                if let Some(FormField::Text { value, .. }) = fields.get_mut(2) {
+                if let Some(FormField::Text { value, .. }) = fields.get_mut(target) {
                     *value = path.clone();
                 }
-                let wsl_empty = matches!(
-                    fields.get(4),
-                    Some(FormField::Text { value, .. }) if value.trim().is_empty()
-                );
-                if wsl_empty {
-                    let linux = crate::domain::models::win_path_to_linux(&path);
-                    if let Some(FormField::Text { value, .. }) = fields.get_mut(4) {
-                        *value = linux;
+                if matches!(
+                    kind,
+                    FormKind::AddProject { .. } | FormKind::EditProject { .. }
+                ) {
+                    let wsl_empty = matches!(
+                        fields.get(ProjectField::WslPath as usize),
+                        Some(FormField::Text { value, .. }) if value.trim().is_empty()
+                    );
+                    if wsl_empty {
+                        let linux = crate::domain::models::win_path_to_linux(&path);
+                        if let Some(FormField::Text { value, .. }) =
+                            fields.get_mut(ProjectField::WslPath as usize)
+                        {
+                            *value = linux;
+                        }
                     }
                 }
                 self.mode = Mode::Form {
                     title,
                     fields,
-                    focus: 2,
+                    focus: target,
                     kind,
                     error: None,
                 };
@@ -475,5 +576,80 @@ impl App {
                 };
             }
         }
+    }
+
+    pub fn resume_after_file_pick(&mut self, path: Option<String>, target: usize) {
+        let Mode::Form {
+            title,
+            mut fields,
+            focus,
+            kind,
+            ..
+        } = self.mode.clone()
+        else {
+            return;
+        };
+        match path {
+            Some(path) => {
+                if let Some(FormField::Text { value, .. }) = fields.get_mut(target) {
+                    *value = path;
+                }
+                self.clear_key = false;
+                self.mode = Mode::Form {
+                    title,
+                    fields,
+                    focus: target,
+                    kind,
+                    error: None,
+                };
+            }
+            None => {
+                self.mode = Mode::Form {
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    error: Some("已取消选择文件".into()),
+                };
+            }
+        }
+    }
+}
+
+fn password_hint(empty: bool) -> &'static str {
+    if empty {
+        "（未设置）"
+    } else {
+        "（已保存，留空不改）"
+    }
+}
+
+fn project_input(fields: &[FormField]) -> ProjectInput {
+    ProjectInput {
+        name: App::field_value(fields, ProjectField::Name as usize),
+        alias: App::field_value(fields, ProjectField::Alias as usize),
+        win_path: App::field_value(fields, ProjectField::WinPath as usize),
+        wsl_path: App::field_value(fields, ProjectField::WslPath as usize),
+        connection_id: App::field_value(fields, ProjectField::Connection as usize),
+        remote_path: App::field_value(fields, ProjectField::RemotePath as usize),
+    }
+}
+
+fn connection_draft(fields: &[FormField]) -> crate::domain::ConnectionDraft {
+    let port = App::field_value(fields, ConnField::Port as usize);
+    let port = port.trim().parse::<u16>().unwrap_or(22);
+    crate::domain::ConnectionDraft {
+        name: App::field_value(fields, ConnField::Name as usize),
+        user: App::field_value(fields, ConnField::User as usize),
+        host: App::field_value(fields, ConnField::Host as usize),
+        port,
+    }
+}
+
+fn secret_input(fields: &[FormField]) -> SecretInput {
+    SecretInput {
+        key_source: App::field_value(fields, ConnField::KeySource as usize),
+        password: App::field_value(fields, ConnField::Password as usize),
+        key_pass: App::field_value(fields, ConnField::KeyPass as usize),
     }
 }

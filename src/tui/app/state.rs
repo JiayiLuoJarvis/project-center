@@ -11,18 +11,48 @@ pub enum Focus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LeftItem {
     Group(usize),
-    Trash,
-    Config,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RightPane {
     Projects,
+    Connections,
     Trash,
     ConfigEnvs,
     ConfigTools { env: ConfigEnv },
     Commands { group: String, project_id: String },
 }
+
+impl RightPane {
+    /// Esc 返回表：设置子页回设置弹窗；工具列表回环境；命令回项目。
+    pub fn parent(&self) -> Option<RightPane> {
+        match self {
+            RightPane::Connections | RightPane::Trash | RightPane::ConfigEnvs => None,
+            RightPane::ConfigTools { .. } => Some(RightPane::ConfigEnvs),
+            RightPane::Commands { .. } => Some(RightPane::Projects),
+            RightPane::Projects => None,
+        }
+    }
+
+    pub fn is_settings_child(&self) -> bool {
+        matches!(
+            self,
+            RightPane::Connections | RightPane::Trash | RightPane::ConfigEnvs
+        )
+    }
+
+    pub fn settings_index(&self) -> usize {
+        match self {
+            RightPane::Connections => 0,
+            RightPane::Trash => 1,
+            RightPane::ConfigEnvs | RightPane::ConfigTools { .. } => 2,
+            _ => 0,
+        }
+    }
+}
+
+pub const SETTINGS_ITEMS: [&str; 3] = ["远程连接", "回收站", "启动工具"];
+pub const NEW_CONNECTION_LABEL: &str = "＋ 新建连接…";
 
 #[derive(Clone, Debug)]
 pub enum ListKind {
@@ -44,6 +74,10 @@ pub enum ListKind {
         project_id: String,
         options: Vec<LaunchOption>,
     },
+    PickConnection {
+        ids: Vec<String>,
+        suspended: Box<SuspendedForm>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -63,6 +97,9 @@ pub enum ActionKind {
         group: String,
         project_id: String,
         index: usize,
+    },
+    Connection {
+        id: String,
     },
 }
 
@@ -92,6 +129,11 @@ pub enum ConfirmKind {
         #[allow(dead_code)]
         name: String,
     },
+    DeleteConnection {
+        id: String,
+        #[allow(dead_code)]
+        name: String,
+    },
     PurgeTrash {
         id: String,
         #[allow(dead_code)]
@@ -101,14 +143,20 @@ pub enum ConfirmKind {
     ResetConfig,
 }
 
+/// 表单按钮动作；`target` 为要回填/清空的文本字段索引。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ButtonAction {
+    PickFolder { target: usize },
+    PickFile { target: usize },
+    ClearKey { target: usize },
+}
+
 #[derive(Clone, Debug)]
 pub enum FormField {
     Text {
         label: String,
         value: String,
     },
-    /// 密码输入：value 存明文，渲染为星号掩码。
-    /// `empty_hint`：value 为空时显示的占位（如「未设置」/「已保存，留空不改」）。
     Password {
         label: String,
         value: String,
@@ -116,7 +164,22 @@ pub enum FormField {
     },
     Button {
         label: String,
+        action: ButtonAction,
     },
+    /// 只读选择：Enter 打开选择器；Backspace/Ctrl+U 清空。
+    Select {
+        label: String,
+        display: String,
+        value: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct SuspendedForm {
+    pub title: String,
+    pub fields: Vec<FormField>,
+    pub focus: usize,
+    pub kind: FormKind,
 }
 
 #[derive(Clone, Debug)]
@@ -131,7 +194,6 @@ pub enum FormKind {
     EditProject {
         group: String,
         project_id: String,
-        old_name: String,
     },
     AddCommand {
         group: String,
@@ -151,11 +213,68 @@ pub enum FormKind {
         env: ConfigEnv,
         index: usize,
     },
+    AddConnection {
+        resume: Option<Box<SuspendedForm>>,
+    },
+    EditConnection {
+        id: String,
+    },
+}
+
+/// 项目表单固定布局；`as usize` 即字段下标。
+#[repr(usize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProjectField {
+    Name = 0,
+    Alias = 1,
+    WinPath = 2,
+    BrowseFolder = 3,
+    WslPath = 4,
+    Connection = 5,
+    RemotePath = 6,
+}
+
+impl ProjectField {
+    pub const COUNT: usize = 7;
+}
+
+impl From<ProjectField> for usize {
+    fn from(field: ProjectField) -> usize {
+        field as usize
+    }
+}
+
+/// 连接表单固定布局（含编辑态「清除密钥」）。
+#[repr(usize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnField {
+    Name = 0,
+    User = 1,
+    Host = 2,
+    Port = 3,
+    KeySource = 4,
+    BrowseKey = 5,
+    ClearKey = 6,
+    Password = 7,
+    KeyPass = 8,
+}
+
+impl ConnField {
+    pub const COUNT: usize = 9;
+}
+
+impl From<ConnField> for usize {
+    fn from(field: ConnField) -> usize {
+        field as usize
+    }
 }
 
 #[derive(Clone, Debug)]
 pub enum Mode {
     Browse,
+    SettingsMenu {
+        selected: usize,
+    },
     LaunchPicker {
         group: String,
         project_id: String,
@@ -186,13 +305,10 @@ pub enum Mode {
         message: String,
         kind: ConfirmKind,
     },
-    /// 查看项目的保存密码/口令：PIN 验证通过后显示明文。
     SecretViewer {
-        group: String,
-        project_id: String,
+        connection_id: String,
         pin_input: String,
         attempts: u8,
-        /// 验证通过后的 (登录密码, 私钥口令)；未验证为 None。
         revealed: Option<(Option<String>, Option<String>)>,
         error: Option<String>,
     },
@@ -210,7 +326,12 @@ pub enum Outcome {
         option: LaunchOption,
         exit_after: bool,
     },
-    PickFolder,
+    PickFolder {
+        target: usize,
+    },
+    PickFile {
+        target: usize,
+    },
 }
 
 pub struct App {
@@ -224,4 +345,6 @@ pub struct App {
     pub exit_after_launch: bool,
     pub short_session: bool,
     pub quit_confirm: bool,
+    /// 连接编辑表单点了「清除已导入密钥」：提交时移除密钥（Esc 取消即丢弃）。
+    pub clear_key: bool,
 }
