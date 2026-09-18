@@ -106,6 +106,75 @@ pub fn simple_item(text: impl Into<String>) -> ListItem<'static> {
     ListItem::new(Line::from(Span::styled(text.into(), theme::base())))
 }
 
+/// 分组行视图：优雅的层级结构与右对齐胶囊徽标。
+/// 布局：序号(低亮) + 菱形图标(强调色) + 分组名(高亮/常规) + 可选别名(淡紫色) ... [ 项目数 ](暗胶囊)
+pub fn group_item(
+    index: usize,
+    group: &crate::domain::models::Group,
+    selected: bool,
+    max_width: usize,
+) -> ListItem<'static> {
+    let mut left_spans = vec![
+        Span::styled(format!("{} ", format_list_index(index)), theme::dim()),
+        Span::styled(
+            "◆ ",
+            if selected {
+                theme::accent()
+            } else {
+                theme::muted()
+            },
+        ),
+        Span::styled(
+            group.name.clone(),
+            if selected {
+                theme::base().add_modifier(Modifier::BOLD)
+            } else {
+                theme::base()
+            },
+        ),
+    ];
+
+    if !group.alias.trim().is_empty() {
+        left_spans.push(Span::raw(" "));
+        left_spans.push(Span::styled(
+            format!("[{}]", group.alias.trim()),
+            theme::muted(),
+        ));
+    }
+
+    let left_line = Line::from(left_spans.clone());
+    let left_w = left_line.width();
+
+    // 胶囊徽章：[ 3 ] 或 [ 12 ]
+    let count_text = format!(" {} ", group.projects.len());
+    let badge_spans = vec![
+        Span::styled("[", theme::dim()),
+        Span::styled(
+            count_text,
+            if selected {
+                theme::accent()
+            } else {
+                theme::muted()
+            },
+        ),
+        Span::styled("]", theme::dim()),
+    ];
+    let badge_w = Line::from(badge_spans.clone()).width();
+
+    let mut line_spans = left_spans;
+    if max_width > left_w + badge_w + 1 {
+        let padding = max_width.saturating_sub(left_w + badge_w);
+        line_spans.push(Span::raw(" ".repeat(padding)));
+        line_spans.extend(badge_spans);
+    } else {
+        // 区域较窄时保持紧凑并留一个空格
+        line_spans.push(Span::raw(" "));
+        line_spans.extend(badge_spans);
+    }
+
+    ListItem::new(Line::from(line_spans))
+}
+
 pub fn selected_style() -> Style {
     theme::selected().add_modifier(Modifier::BOLD)
 }
@@ -149,4 +218,20 @@ fn truncate_width(s: &str, max: usize) -> String {
 
 fn unicode_width(ch: char) -> usize {
     if ch.is_ascii() { 1 } else { 2 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::Group;
+
+    #[test]
+    fn group_item_renders_aligned_badge() {
+        let mut group = Group::new("backend");
+        group.alias = "be".into();
+        let item_normal = group_item(0, &group, false, 30);
+        let item_selected = group_item(0, &group, true, 30);
+        let item_narrow = group_item(0, &group, false, 10);
+        let _ = (item_normal, item_selected, item_narrow);
+    }
 }

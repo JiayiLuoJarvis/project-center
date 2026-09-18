@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 
 use crate::domain::models::ProjectData;
 use crate::persist::AppConfig;
-use crate::tui::app::{App, Focus, FormField, Mode, RightPane, SETTINGS_ITEMS, format_list_index};
+use crate::tui::app::{App, Focus, FormField, Mode, RightPane, SETTINGS_ITEMS};
 use crate::tui::theme;
 use crate::tui::widgets;
 
@@ -118,29 +118,22 @@ fn render_left(frame: &mut Frame, area: Rect, app: &App, data: &ProjectData) {
         .border_style(theme::border(focused))
         .style(theme::panel());
 
+    let inner_width = area.width.saturating_sub(4) as usize; // 减去左右边框(2)及高亮符号"▶ "(2)
+    let left_items = app.left_items(data);
+    let current_sel = app.left_sel.min(left_items.len().saturating_sub(1));
+
     let mut items: Vec<ListItem> = Vec::new();
-    for item in app.left_items(data) {
+    for (idx, item) in left_items.iter().enumerate() {
         match item {
             crate::tui::app::LeftItem::Group(gi) => {
-                let g = &data.groups[gi];
-                let label = if g.alias.trim().is_empty() {
-                    format!("{} {}  {}", format_list_index(gi), g.name, g.projects.len())
-                } else {
-                    format!(
-                        "{} {} [{}]  {}",
-                        format_list_index(gi),
-                        g.name,
-                        g.alias,
-                        g.projects.len()
-                    )
-                };
-                items.push(widgets::simple_item(label));
+                let g = &data.groups[*gi];
+                items.push(widgets::group_item(*gi, g, idx == current_sel, inner_width));
             }
         }
     }
 
     let mut state = ListState::default();
-    state.select(Some(app.left_sel.min(items.len().saturating_sub(1))));
+    state.select(Some(current_sel));
 
     let list = List::new(items)
         .block(block)
