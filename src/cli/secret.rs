@@ -118,26 +118,32 @@ pub(crate) fn cmd_askpass(prompt: &str) -> Result<()> {
     }
     let id = std::env::var("PCS_ASKPASS_ID").unwrap_or_default();
     let data = Store::load_readonly();
-    let Some(project) = data
-        .groups
-        .iter()
-        .flat_map(|g| g.projects.iter())
-        .find(|p| p.id.eq_ignore_ascii_case(&id))
-    else {
+    let Some(enc) = askpass_secret(&data, &id, askpass_kind(prompt)) else {
         return Ok(());
     };
-    let enc = match askpass_kind(prompt) {
-        AskpassKind::Password => &project.ssh_password_enc,
-        AskpassKind::KeyPass => &project.ssh_key_pass_enc,
-        AskpassKind::Ignore => return Ok(()),
-    };
-    if enc.trim().is_empty() {
-        return Ok(());
-    }
     if let Ok(plain) = secret::unprotect(enc) {
         println!("{plain}");
     }
     Ok(())
+}
+
+/// 按连接 id 取密码/口令密文。id 对不上或非密码类 prompt → None（askpass 输出空）。
+fn askpass_secret<'a>(
+    data: &'a crate::domain::models::ProjectData,
+    id: &str,
+    kind: AskpassKind,
+) -> Option<&'a str> {
+    let connection = data.connection(id)?;
+    let enc = match kind {
+        AskpassKind::Password => &connection.ssh_password_enc,
+        AskpassKind::KeyPass => &connection.ssh_key_pass_enc,
+        AskpassKind::Ignore => return None,
+    };
+    if enc.trim().is_empty() {
+        None
+    } else {
+        Some(enc.as_str())
+    }
 }
 
 #[cfg(test)]
@@ -224,5 +230,32 @@ mod tests {
         assert!(!askpass_token_ok("xyz", &path.to_string_lossy()));
         assert!(!askpass_token_ok("ff", &path.to_string_lossy()));
         cleanup_token_file(&path);
+    }
+
+    #[test]
+    fn askpass_secret_looks_up_connection_id() {
+        let mut conn = crate::domain::models::Connection::default();
+        conn.id = "CID-1".into();
+        conn.host = "h".into();
+        conn.ssh_password_enc = "PW".into();
+        conn.ssh_key_pass_enc = "KP".into();
+        let data = crate::domain::models::ProjectData {
+            connections: vec![conn],
+            ..Default::default()
+        };
+        assert_eq!(
+            askpass_secret(&data, "cid-1", AskpassKind::Password),
+            Some("PW")
+        );
+        assert_eq!(
+            askpass_secret(&data, "CID-1", AskpassKind::KeyPass),
+            Some("KP")
+        );
+        assert_eq!(askpass_secret(&data, "cid-1", AskpassKind::Ignore), None);
+        assert_eq!(
+            askpass_secret(&data, "missing", AskpassKind::Password),
+            None
+        );
+        assert_eq!(askpass_secret(&data, "", AskpassKind::Password), None);
     }
 }

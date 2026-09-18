@@ -6,11 +6,15 @@ use crate::persist::{AppConfig, Config, Store};
 use crate::tui;
 
 use super::args::{OpenArgs, ProjectSelector};
-use super::common::find_selected;
+use super::common::{find_selected, select_project};
 
 pub(crate) fn cmd_open(args: OpenArgs) -> Result<()> {
     let config = Config::load();
-    let (project, group_name) = find_selected(&args.selector)?;
+    let mut data = Store::load();
+    let (group_index, project_index) =
+        select_project(&data, &args.selector.name, args.selector.group.as_deref())?;
+    let group_name = data.groups[group_index].name.clone();
+    let project_id = data.groups[group_index].projects[project_index].id.clone();
     let direct = if args.wsl {
         Some((LaunchEnv::Wsl, String::new()))
     } else if args.powershell {
@@ -23,20 +27,24 @@ pub(crate) fn cmd_open(args: OpenArgs) -> Result<()> {
         None
     };
     if let Some((env, command)) = direct {
-        let spawned = launcher::spawn_direct(&project, &group_name, env, &command)
+        let project = &data.groups[group_index].projects[project_index];
+        let spawned = launcher::spawn_direct(&data, project, &group_name, env, &command)
             .map_err(anyhow::Error::msg)?;
         launcher::wait_spawned(spawned).map_err(anyhow::Error::msg)?;
         return Ok(());
     }
-    let mut data = Store::load();
     let mut config = Config::load();
-    tui::choose_launch(&mut data, &mut config, &group_name, &project.id)
+    tui::choose_launch(&mut data, &mut config, &group_name, &project_id)
 }
 
 pub(crate) fn cmd_direct(selector: &ProjectSelector, env: LaunchEnv) -> Result<()> {
-    let (project, group_name) = find_selected(selector)?;
+    let data = Store::load();
+    let (group_index, project_index) =
+        select_project(&data, &selector.name, selector.group.as_deref())?;
+    let group_name = data.groups[group_index].name.clone();
+    let project = &data.groups[group_index].projects[project_index];
     let spawned =
-        launcher::spawn_direct(&project, &group_name, env, "").map_err(anyhow::Error::msg)?;
+        launcher::spawn_direct(&data, project, &group_name, env, "").map_err(anyhow::Error::msg)?;
     launcher::wait_spawned(spawned).map_err(anyhow::Error::msg)?;
     Ok(())
 }
@@ -44,8 +52,12 @@ pub(crate) fn cmd_direct(selector: &ProjectSelector, env: LaunchEnv) -> Result<(
 /// `pcs code` 使用 config.ide 的第一个工具（默认 VS Code），跟随用户配置。
 pub(crate) fn cmd_code(selector: &ProjectSelector, config: &AppConfig) -> Result<()> {
     let command = first_ide_command(config)?;
-    let (project, group_name) = find_selected(selector)?;
-    let spawned = launcher::spawn_direct(&project, &group_name, LaunchEnv::Ide, &command)
+    let data = Store::load();
+    let (group_index, project_index) =
+        select_project(&data, &selector.name, selector.group.as_deref())?;
+    let group_name = data.groups[group_index].name.clone();
+    let project = &data.groups[group_index].projects[project_index];
+    let spawned = launcher::spawn_direct(&data, project, &group_name, LaunchEnv::Ide, &command)
         .map_err(anyhow::Error::msg)?;
     launcher::wait_spawned(spawned).map_err(anyhow::Error::msg)?;
     Ok(())

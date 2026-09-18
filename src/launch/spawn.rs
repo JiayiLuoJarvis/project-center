@@ -5,7 +5,7 @@ use zeroize::Zeroize;
 
 use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, SetConsoleTitleW};
 
-use crate::domain::models::Project;
+use crate::domain::models::{Connection, Project, ProjectData};
 use crate::persist as secret;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,15 +69,16 @@ fn console_title(project: &Project, group_name: &str) -> String {
     format!("{} - {}", project.name, group_name)
 }
 
-fn set_console_title(project: &Project, group_name: &str) {
-    let title: Vec<u16> = console_title(project, group_name)
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+fn apply_console_title(title: &str) {
+    let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
     // 标题设置失败不应阻止项目启动。
     unsafe {
         SetConsoleTitleW(title.as_ptr());
     }
+}
+
+fn set_console_title(project: &Project, group_name: &str) {
+    apply_console_title(&console_title(project, group_name));
 }
 
 /// 构造 `wsl.exe` 参数：`--cd <linux> [-- <command>]`；command 为空表示裸终端。
@@ -147,48 +148,21 @@ fn spawn_explorer(p: &Project) -> Result<std::process::Child, String> {
         .map_err(|e| format!("资源管理器启动失败: {e}"))
 }
 
-/// 拆出主机与可选端口：`host:port` -> `(host, Some(port))`。
-/// 仅当 host 部分不含 `:` 且末段为纯数字时视为端口；IPv6 目标 v1 不支持
-/// （一律不拆，保证不拆坏目标串）。输入需已 trim。
-pub(crate) fn split_host_port(rest: &str) -> (&str, Option<&str>) {
-    match rest.rfind(':') {
-        Some(pos) => {
-            let (host, port) = rest.split_at(pos);
-            let port = &port[1..];
-            if !host.is_empty()
-                && !host.contains(':')
-                && !port.is_empty()
-                && port.bytes().all(|b| b.is_ascii_digit())
-            {
-                (host, Some(port))
-            } else {
-                (rest, None)
-            }
-        }
-        None => (rest, None),
-    }
-}
-
-/// 解析 SSH 目标：`(user@host:port)` -> `(user@host, Option<port>)`。
-fn parse_ssh_target(target: &str) -> (String, Option<String>) {
-    let (host, port) = split_host_port(target.trim());
-    (host.to_string(), port.map(str::to_string))
-}
-
-/// 构造 ssh 参数：`[-p port] [-i key] user@host [-t "cd '<path>' 2>/dev/null; exec $SHELL"]`。
+/// 构造 ssh 参数：从 Connection 取 user/host/port；项目 path 作为远程 cwd。
+/// 默认端口 22 不传 `-p`（与 OpenSSH 缺省一致）。
+/// `[-p port] [-i key] user@host [-t "cd '<path>' 2>/dev/null; exec $SHELL"]`。
 /// 远程路径用 `;` 串联（cd 失败静默落到默认 shell，不断连）。
-fn ssh_args(target: &str, key_path: Option<&str>, remote_path: &str) -> Vec<String> {
-    let (userhost, port) = parse_ssh_target(target);
+fn ssh_args(connection: &Connection, key_path: Option<&str>, remote_path: &str) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
-    if let Some(port) = port {
+    if connection.port != 22 {
         args.push("-p".into());
-        args.push(port);
+        args.push(connection.port.to_string());
     }
     if let Some(key) = key_path {
         args.push("-i".into());
         args.push(key.to_string());
     }
-    args.push(userhost);
+    args.push(connection.userhost());
     let remote = remote_path.trim();
     if !remote.is_empty() {
         let escaped = remote.replace('\'', "''");
@@ -221,19 +195,12 @@ fn write_askpass_token_file(token: &str) -> Result<PathBuf, String> {
 
 /// 父进程预解密验证：所有已保存的秘密都能解开才注入 askpass env
 ///（否则 force 模式下 askpass 输出空会导致认证必败且无法回退 tty 提示）。
-fn askpass_env_ok(p: &Project) -> bool {
-    let password_ok =
-        p.ssh_password_enc.trim().is_empty() || secret::unprotect(&p.ssh_password_enc).is_ok();
-    let key_pass_ok =
-        p.ssh_key_pass_enc.trim().is_empty() || secret::unprotect(&p.ssh_key_pass_enc).is_ok();
+fn askpass_env_ok(connection: &Connection) -> bool {
+    let password_ok = connection.ssh_password_enc.trim().is_empty()
+        || secret::unprotect(&connection.ssh_password_enc).is_ok();
+    let key_pass_ok = connection.ssh_key_pass_enc.trim().is_empty()
+        || secret::unprotect(&connection.ssh_key_pass_enc).is_ok();
     password_ok && key_pass_ok
-}
-
-/// 项目是否存有任一密码/口令密文：askpass 注入的前提。
-/// 无秘密时不注入——force 会把交互密码提示也路由到 askpass（输出空），
-/// 用户反而无法手动输密码登录。
-fn has_saved_secrets(p: &Project) -> bool {
-    !p.ssh_password_enc.trim().is_empty() || !p.ssh_key_pass_enc.trim().is_empty()
 }
 
 /// askpass 注入决策。存有可解密秘密但主机不在 known_hosts 时跳过注入：
@@ -292,15 +259,37 @@ fn host_known_with(file: Option<&std::path::Path>, lookup_name: &str) -> bool {
     }
 }
 
-fn spawn_ssh(p: &Project, group_name: &str) -> Result<SpawnedDirect, String> {
-    set_console_title(p, group_name);
+/// 从 ProjectData 解析项目引用的连接。
+/// 加载路径已迁移，只认 `connection_id`（不回退遗留 `ssh_target`）。
+/// 缺 id → NotSshProject；id 指向不存在的连接 → ConnectionMissing（不 panic）。
+fn resolve_ssh<'a>(data: &'a ProjectData, p: &Project) -> super::Result<&'a Connection> {
+    match data.connection_of(p) {
+        Ok(connection) => Ok(connection),
+        Err(crate::domain::Error::ProjectNotSsh { name }) => {
+            Err(super::Error::NotSshProject { name })
+        }
+        Err(crate::domain::Error::ConnectionMissing { project }) => {
+            Err(super::Error::ConnectionMissing { project })
+        }
+        Err(e) => Err(super::Error::from(e.to_string())),
+    }
+}
+
+/// 用连接认证启动 ssh：args 来自 Connection user/host/port，远程 cwd 为项目 path。
+/// askpass 的 `PCS_ASKPASS_ID` 是连接 id。
+pub fn spawn_ssh(
+    connection: &Connection,
+    remote_path: &str,
+    title: &str,
+) -> super::Result<SpawnedDirect> {
+    apply_console_title(title);
 
     // 私钥：解密成功才落临时文件；失败降级为不带密钥启动（回退密码/交互）。
     let mut temp_key: Option<PathBuf> = None;
     let mut key_arg: Option<String> = None;
     let mut temp_token: Option<PathBuf> = None;
-    if !p.ssh_key_file.trim().is_empty() {
-        match secret::read_key_file(&p.ssh_key_file) {
+    if connection.has_key() {
+        match secret::read_key_file(&connection.ssh_key_file) {
             Ok(mut plain) => {
                 let dir = secret::data_root().join("keys_tmp");
                 if let Err(e) = std::fs::create_dir_all(&dir) {
@@ -324,19 +313,15 @@ fn spawn_ssh(p: &Project, group_name: &str) -> Result<SpawnedDirect, String> {
     }
 
     let mut cmd = Command::new("ssh");
-    cmd.args(ssh_args(&p.ssh_target, key_arg.as_deref(), &p.path));
+    cmd.args(ssh_args(connection, key_arg.as_deref(), remote_path));
 
-    // askpass 自动填充：按决策注入；env 只携带项目 id 与一次性 token，
+    // askpass 自动填充：按决策注入；env 只携带连接 id 与一次性 token，
     // 秘密由 __askpass 自行解密。主机未知（首连）时跳过注入走交互。
-    let (userhost, port) = parse_ssh_target(&p.ssh_target);
-    let host = userhost
-        .rsplit_once('@')
-        .map(|(_, h)| h)
-        .unwrap_or(&userhost);
+    let port = connection.port.to_string();
     let plan = askpass_plan(
-        has_saved_secrets(p),
-        askpass_env_ok(p),
-        host_known(host, port.as_deref()),
+        connection.has_saved_secrets(),
+        askpass_env_ok(connection),
+        host_known(&connection.host, Some(&port)),
     );
     match plan {
         AskpassPlan::NoSecrets => {}
@@ -345,7 +330,8 @@ fn spawn_ssh(p: &Project, group_name: &str) -> Result<SpawnedDirect, String> {
         }
         AskpassPlan::FirstConnect => {
             eprintln!(
-                "提示：首次连接 {host}：请确认 host key 并手动输入密码，连接成功后自动填充。"
+                "提示：首次连接 {}：请确认 host key 并手动输入密码，连接成功后自动填充。",
+                connection.host
             );
         }
         AskpassPlan::Inject => {
@@ -356,7 +342,7 @@ fn spawn_ssh(p: &Project, group_name: &str) -> Result<SpawnedDirect, String> {
                             cmd.env("SSH_ASKPASS", &exe);
                             cmd.env("SSH_ASKPASS_REQUIRE", "force");
                             cmd.env("DISPLAY", ":0");
-                            cmd.env("PCS_ASKPASS_ID", &p.id);
+                            cmd.env("PCS_ASKPASS_ID", &connection.id);
                             cmd.env("PCS_ASKPASS_TOKEN", &token);
                             cmd.env("PCS_ASKPASS_TOKEN_FILE", &token_path);
                             temp_token = Some(token_path);
@@ -385,7 +371,7 @@ fn spawn_ssh(p: &Project, group_name: &str) -> Result<SpawnedDirect, String> {
             if let Some(path) = &temp_token {
                 secret::shred_and_remove(path);
             }
-            Err(format!("SSH 启动失败: {e}"))
+            Err(super::Error::from(format!("SSH 启动失败: {e}")))
         }
     }
 }
@@ -402,19 +388,17 @@ pub struct SpawnedDirect {
 
 /// 生成子进程（不等待）。校验 Windows 路径可用性（与旧 `launch_direct` 语义一致）。
 /// SSH 项目仅支持 `LaunchEnv::Ssh`；其他环境对其报错。
+/// SSH 走 `resolve_ssh` 再 `spawn_ssh`：只认 `connection_id`（加载已迁移）。
 pub fn spawn_direct(
+    data: &ProjectData,
     p: &Project,
     group_name: &str,
     env: LaunchEnv,
     command: &str,
 ) -> super::Result<SpawnedDirect> {
     if env == LaunchEnv::Ssh {
-        if !p.is_ssh_project() {
-            return Err(super::Error::NotSshProject {
-                name: p.name.clone(),
-            });
-        }
-        return spawn_ssh(p, group_name).map_err(super::Error::from);
+        let connection = resolve_ssh(data, p)?;
+        return spawn_ssh(connection, &p.path, &console_title(p, group_name));
     }
     if matches!(
         env,
@@ -532,37 +516,15 @@ mod tests {
         assert_eq!(LaunchEnv::Ssh.short_label(), "ssh");
     }
 
-    #[test]
-    fn parse_ssh_target_basic_port_and_ipv6_guard() {
-        assert_eq!(
-            parse_ssh_target("abc@192.0.2.10"),
-            ("abc@192.0.2.10".into(), None)
-        );
-        assert_eq!(
-            parse_ssh_target("abc@host:2222"),
-            ("abc@host".into(), Some("2222".into()))
-        );
-        assert_eq!(
-            parse_ssh_target("abc@host:22x"),
-            ("abc@host:22x".into(), None)
-        );
-        assert_eq!(parse_ssh_target(":2222"), (":2222".into(), None));
-        // IPv6 一律不拆端口（v1 不支持，但保证不拆坏目标串）
-        assert_eq!(parse_ssh_target("abc@::1"), ("abc@::1".into(), None));
-        assert_eq!(
-            parse_ssh_target("abc@[::1]:22"),
-            ("abc@[::1]:22".into(), None)
-        );
-    }
-
-    #[test]
-    fn split_host_port_direct_cases() {
-        assert_eq!(split_host_port("h"), ("h", None));
-        assert_eq!(split_host_port("h:2222"), ("h", Some("2222")));
-        assert_eq!(split_host_port("h:22x"), ("h:22x", None));
-        assert_eq!(split_host_port(":2222"), (":2222", None));
-        // IPv6 一律不拆
-        assert_eq!(split_host_port("::1"), ("::1", None));
+    fn conn(user: &str, host: &str, port: u16) -> Connection {
+        Connection {
+            id: "cid".into(),
+            name: host.into(),
+            user: user.into(),
+            host: host.into(),
+            port,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -628,10 +590,13 @@ mod tests {
     }
 
     #[test]
-    fn ssh_args_bare_and_with_path() {
-        assert_eq!(ssh_args("abc@192.0.2.10", None, ""), vec!["abc@192.0.2.10"]);
+    fn ssh_args_from_connection() {
         assert_eq!(
-            ssh_args("abc@h:2222", None, "/opt/foo"),
+            ssh_args(&conn("abc", "192.0.2.10", 22), None, ""),
+            vec!["abc@192.0.2.10"]
+        );
+        assert_eq!(
+            ssh_args(&conn("abc", "h", 2222), None, "/opt/foo"),
             vec![
                 "-p",
                 "2222",
@@ -641,47 +606,86 @@ mod tests {
             ]
         );
         assert_eq!(
-            ssh_args("abc@h", Some("C:\\tmp\\k.key"), ""),
+            ssh_args(&conn("abc", "h", 22), Some("C:\\tmp\\k.key"), ""),
             vec!["-i", "C:\\tmp\\k.key", "abc@h"]
         );
+        assert_eq!(ssh_args(&conn("", "h", 22), None, ""), vec!["h"]);
         // 路径含单引号转义
         assert_eq!(
-            ssh_args("abc@h", None, "/opt/i't's"),
+            ssh_args(&conn("abc", "h", 22), None, "/opt/i't's"),
             vec!["abc@h", "-t", "cd '/opt/i''t''s' 2>/dev/null; exec $SHELL"]
         );
     }
 
     #[test]
     fn askpass_env_ok_requires_all_secrets_decryptable() {
-        let mut p = Project::new("srv", "", "");
+        let mut c = conn("abc", "h", 22);
         // 无任何秘密：env 无用但也无害（不会自动填），视为 ok
-        assert!(askpass_env_ok(&p));
+        assert!(askpass_env_ok(&c));
         // 密文损坏 -> 不允许注入（force 下空输出会导致认证必败）
-        p.ssh_password_enc = "broken-b64!!".into();
-        assert!(!askpass_env_ok(&p));
+        c.ssh_password_enc = "broken-b64!!".into();
+        assert!(!askpass_env_ok(&c));
         // 合法 DPAPI 密文 -> 允许
-        p.ssh_password_enc = secret::protect("pw").unwrap();
-        assert!(askpass_env_ok(&p));
+        c.ssh_password_enc = secret::protect("pw").unwrap();
+        assert!(askpass_env_ok(&c));
         // 口令密文损坏 -> 阻断
-        p.ssh_key_pass_enc = "!!".into();
-        assert!(!askpass_env_ok(&p));
+        c.ssh_key_pass_enc = "!!".into();
+        assert!(!askpass_env_ok(&c));
     }
 
     #[test]
     fn has_saved_secrets_gates_askpass_injection() {
-        let mut p = Project::new("srv", "", "");
+        let mut c = conn("abc", "h", 22);
         // 无任何秘密：不注入（force 会劫持交互密码提示）
-        assert!(!has_saved_secrets(&p));
-        // 仅密码 / 仅口令 / 都有：注入
-        p.ssh_password_enc = secret::protect("pw").unwrap();
-        assert!(has_saved_secrets(&p));
-        let mut p2 = Project::new("srv", "", "");
-        p2.ssh_key_pass_enc = secret::protect("kp").unwrap();
-        assert!(has_saved_secrets(&p2));
-        // 空白密文视同未保存
-        let mut p3 = Project::new("srv", "", "");
-        p3.ssh_password_enc = "  ".into();
-        assert!(!has_saved_secrets(&p3));
+        assert!(!c.has_saved_secrets());
+        c.ssh_password_enc = secret::protect("pw").unwrap();
+        assert!(c.has_saved_secrets());
+        let mut c2 = conn("abc", "h", 22);
+        c2.ssh_key_pass_enc = secret::protect("kp").unwrap();
+        assert!(c2.has_saved_secrets());
+        let mut c3 = conn("abc", "h", 22);
+        c3.ssh_password_enc = "  ".into();
+        assert!(!c3.has_saved_secrets());
+    }
+
+    #[test]
+    fn spawn_direct_ssh_missing_connection_is_error() {
+        let p = Project::new("srv", "/opt/x", "").with_connection("missing-id");
+        let Err(err) = spawn_direct(&ProjectData::default(), &p, "G", LaunchEnv::Ssh, "") else {
+            panic!("expected ConnectionMissing");
+        };
+        assert!(matches!(
+            err,
+            crate::launch::Error::ConnectionMissing { ref project } if project == "srv"
+        ));
+        assert_eq!(
+            err.to_string(),
+            "项目 `srv` 引用的远程连接不存在，请重新选择连接"
+        );
+    }
+
+    #[test]
+    fn spawn_direct_ssh_requires_connection_id() {
+        let p = Project::new("srv", "/opt/x", "").with_ssh_target("abc@h");
+        let Err(err) = spawn_direct(&ProjectData::default(), &p, "G", LaunchEnv::Ssh, "") else {
+            panic!("expected NotSshProject");
+        };
+        assert!(matches!(
+            err,
+            crate::launch::Error::NotSshProject { name } if name == "srv"
+        ));
+    }
+
+    #[test]
+    fn spawn_direct_ssh_local_project_is_not_ssh() {
+        let p = Project::new("app", r"C:\a", "");
+        let Err(err) = spawn_direct(&ProjectData::default(), &p, "G", LaunchEnv::Ssh, "") else {
+            panic!("expected NotSshProject");
+        };
+        assert!(matches!(
+            err,
+            crate::launch::Error::NotSshProject { name } if name == "app"
+        ));
     }
 
     #[test]

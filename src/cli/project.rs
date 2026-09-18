@@ -257,8 +257,8 @@ pub(crate) fn cmd_run(args: RunArgs) -> Result<()> {
         bail!("缺少命令名，或使用 --list 列出项目自定义命令");
     };
     let (env, command) = resolve_run_command(project, name)?;
-    let spawned =
-        launcher::spawn_direct(project, &group_name, env, &command).map_err(anyhow::Error::msg)?;
+    let spawned = launcher::spawn_direct(&data, project, &group_name, env, &command)
+        .map_err(anyhow::Error::msg)?;
     launcher::wait_spawned(spawned).map_err(anyhow::Error::msg)?;
     Ok(())
 }

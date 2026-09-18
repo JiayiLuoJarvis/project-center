@@ -65,7 +65,7 @@ fn loop_ui(
                 exit_after,
             } => {
                 ratatui::restore();
-                let launch_result = do_launch(&project, &group, &option);
+                let launch_result = do_launch(data, &project, &group, &option);
                 if exit_after || app.short_session {
                     return launch_result.map(|_| ());
                 }
@@ -93,8 +93,13 @@ fn loop_ui(
     }
 }
 
-fn do_launch(project: &Project, group: &str, option: &crate::launch::LaunchOption) -> Result<i32> {
-    let spawned = launcher::spawn_direct(project, group, option.env, &option.command)
+fn do_launch(
+    data: &ProjectData,
+    project: &Project,
+    group: &str,
+    option: &crate::launch::LaunchOption,
+) -> Result<i32> {
+    let spawned = launcher::spawn_direct(data, project, group, option.env, &option.command)
         .map_err(anyhow::Error::msg)?;
     launcher::wait_spawned(spawned).map_err(anyhow::Error::msg)
 }

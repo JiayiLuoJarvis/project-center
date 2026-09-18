@@ -69,9 +69,19 @@ pub(crate) fn cmd_pin(command: PinCommand) -> Result<()> {
     Ok(())
 }
 
-/// 清空 groups 与 trash 快照中的全部秘密字段，并删除整个密钥目录。
+/// 清空连接与遗留项目级秘密字段，并删除整个密钥目录。
 /// 目录删除失败仅警告：字段已清，残留文件由下次启动的孤儿清理兜底。
 pub(crate) fn clear_all_saved_secrets(data: &mut ProjectData) {
+    clear_secret_fields(data);
+    if let Err(e) = std::fs::remove_dir_all(secret::data_root().join("keys"))
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        eprintln!("警告：密钥目录删除失败（{e}），残留文件将在下次启动时清理。");
+    }
+}
+
+/// 内存字段：连接秘密 + 尚未删掉的项目/回收站遗留字段。
+fn clear_secret_fields(data: &mut ProjectData) {
     let clear = |p: &mut Project| {
         p.ssh_key_file.clear();
         p.ssh_key_path.clear();
@@ -90,10 +100,50 @@ pub(crate) fn clear_all_saved_secrets(data: &mut ProjectData) {
             clear(project);
         }
     }
-    data.pending_key_deletes.clear();
-    if let Err(e) = std::fs::remove_dir_all(secret::data_root().join("keys"))
-        && e.kind() != std::io::ErrorKind::NotFound
-    {
-        eprintln!("警告：密钥目录删除失败（{e}），残留文件将在下次启动时清理。");
+    data.clear_all_connection_secrets();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::models::{Connection, DeletedItem, Group, Project};
+
+    #[test]
+    fn clear_secret_fields_clears_connections_and_legacy() {
+        let mut conn = Connection::default();
+        conn.id = "c1".into();
+        conn.host = "h".into();
+        conn.ssh_key_file = "keys/c1.key".into();
+        conn.ssh_password_enc = "PW".into();
+        conn.ssh_key_pass_enc = "KP".into();
+
+        let mut live = Project::new("app", "/opt/a", "");
+        live.ssh_key_file = "keys/old.key".into();
+        live.ssh_password_enc = "old-pw".into();
+
+        let mut gone = Project::new("gone", "/opt/b", "");
+        gone.ssh_key_pass_enc = "old-kp".into();
+
+        let mut data = ProjectData {
+            groups: vec![Group {
+                name: "G".into(),
+                alias: String::new(),
+                projects: vec![live],
+            }],
+            trash: vec![DeletedItem::from_project(&gone, "G", 1)],
+            connections: vec![conn],
+            pending_key_deletes: vec!["keys/stale.key".into()],
+            ..Default::default()
+        };
+
+        clear_secret_fields(&mut data);
+
+        assert!(data.connections[0].ssh_key_file.is_empty());
+        assert!(data.connections[0].ssh_password_enc.is_empty());
+        assert!(data.connections[0].ssh_key_pass_enc.is_empty());
+        assert!(data.groups[0].projects[0].ssh_key_file.is_empty());
+        assert!(data.groups[0].projects[0].ssh_password_enc.is_empty());
+        assert!(data.trash[0].ssh_key_pass_enc.is_empty());
+        assert!(data.pending_key_deletes.is_empty());
     }
 }

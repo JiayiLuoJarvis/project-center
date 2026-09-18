@@ -8,6 +8,8 @@ pub enum Error {
     NoWindowsPath { name: String, env: String },
     #[error("项目 `{name}` 是 SSH 远程项目，只支持 SSH 终端启动")]
     SshOnly { name: String },
+    #[error("项目 `{project}` 引用的远程连接不存在，请重新选择连接")]
+    ConnectionMissing { project: String },
     #[error("{0}")]
     Message(String),
 }
