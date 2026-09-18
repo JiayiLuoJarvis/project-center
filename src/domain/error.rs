@@ -54,26 +54,37 @@ pub enum Error {
     ProjectAlreadyInGroup { name: String },
     #[error("目标分组中项目已存在: {name}")]
     ProjectExistsInTarget { name: String },
+    #[allow(dead_code)]
     #[error("未找到远程连接: {name}")]
     ConnectionNotFound { name: String },
+    #[allow(dead_code)]
     #[error("远程连接名不唯一: {name}")]
     ConnectionAmbiguous { name: String },
+    #[allow(dead_code)]
     #[error("远程连接名不能为空")]
     ConnectionNameEmpty,
+    #[allow(dead_code)]
     #[error("远程连接已存在: {name}")]
     ConnectionExists { name: String },
+    #[allow(dead_code)]
     #[error("主机不能为空")]
     ConnectionHostEmpty,
+    #[allow(dead_code)]
     #[error("主机/用户不要包含 @")]
     ConnectionAtSign,
+    #[allow(dead_code)]
     #[error("端口必须是 1-65535 的数字")]
     ConnectionPortInvalid,
+    #[allow(dead_code)]
     #[error("不支持 IPv6 主机")]
     ConnectionIpv6,
+    #[allow(dead_code)]
     #[error("连接 `{name}` 被 {count} 个项目引用，请先修改或删除这些项目")]
     ConnectionInUse { name: String, count: usize },
+    #[allow(dead_code)]
     #[error("项目 `{project}` 引用的远程连接不存在，请重新选择连接")]
     ConnectionMissing { project: String },
+    #[allow(dead_code)]
     #[error("项目 `{name}` 不是 SSH 项目")]
     ProjectNotSsh { name: String },
 }

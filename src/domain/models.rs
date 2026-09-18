@@ -73,11 +73,13 @@ impl Project {
         self
     }
 
+    #[allow(dead_code)]
     pub fn with_connection(mut self, id: impl Into<String>) -> Self {
         self.connection_id = id.into();
         self
     }
 
+    #[allow(dead_code)]
     pub fn connection_id_opt(&self) -> Option<&str> {
         let id = self.connection_id.trim();
         if id.is_empty() { None } else { Some(id) }
@@ -200,6 +202,7 @@ fn default_ssh_port() -> u16 {
     22
 }
 
+#[allow(dead_code)]
 impl Default for Connection {
     fn default() -> Self {
         Self {
@@ -217,6 +220,7 @@ impl Default for Connection {
     }
 }
 
+#[allow(dead_code)]
 impl Connection {
     pub fn new(name: impl Into<String>, endpoint: &Endpoint, now: &str) -> Self {
         Self {
@@ -265,6 +269,7 @@ impl Connection {
 }
 
 /// 规范化的 SSH 端点：迁移合并键与 `--ssh` 复用键都由它决定。
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Endpoint {
     pub user: String,
@@ -272,6 +277,7 @@ pub struct Endpoint {
     pub port: u16,
 }
 
+#[allow(dead_code)]
 impl Endpoint {
     /// `[user@]host[:port]`；host 含 `:`（IPv6）或含 `@`、端口非数字 → Err。
     pub fn parse(target: &str) -> super::Result<Endpoint> {
@@ -330,6 +336,7 @@ impl Endpoint {
 
 /// 拆出主机与可选端口：`host:port` -> `(host, Some(port))`。
 /// 仅当 host 部分不含 `:` 且末段为纯数字时视为端口；IPv6 目标不拆。
+#[allow(dead_code)]
 pub(crate) fn split_host_port(rest: &str) -> (&str, Option<&str>) {
     match rest.rfind(':') {
         Some(pos) => {
@@ -561,11 +568,13 @@ pub fn format_utc_compact(ts: i64) -> String {
 }
 
 /// unix 秒 → `2026-09-18T03:09:00Z`。
+#[allow(dead_code)]
 pub fn format_rfc3339(ts: i64) -> String {
     let (year, month, day, hour, minute, second) = utc_components(ts);
     format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}Z")
 }
 
+#[allow(dead_code)]
 pub fn rfc3339_now() -> String {
     format_rfc3339(current_unix_ts())
 }
