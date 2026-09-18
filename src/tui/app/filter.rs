@@ -1,5 +1,16 @@
 use super::*;
 
+pub(crate) fn format_list_index(i: usize) -> String {
+    format!("{:02}", i + 1)
+}
+
+pub(crate) fn matches_list_index(filter: &str, zero_based: usize) -> bool {
+    if filter.is_empty() || !filter.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    filter.parse::<usize>().is_ok_and(|n| n == zero_based + 1)
+}
+
 impl App {
     pub(crate) fn matches_filter(&self, text: &str) -> bool {
         if self.filter.is_empty() {
@@ -207,5 +218,29 @@ impl App {
             self.right_sel = 0;
         }
         self.clamp_selection(data, config);
+    }
+}
+
+#[cfg(test)]
+mod list_index_tests {
+    use super::{format_list_index, matches_list_index};
+
+    #[test]
+    fn format_list_index_pads_then_grows() {
+        assert_eq!(format_list_index(0), "01");
+        assert_eq!(format_list_index(8), "09");
+        assert_eq!(format_list_index(99), "100");
+    }
+
+    #[test]
+    fn matches_list_index_numeric_equality() {
+        assert!(matches_list_index("1", 0));
+        assert!(matches_list_index("01", 0));
+        assert!(matches_list_index("001", 0));
+        assert!(!matches_list_index("1", 1));
+        assert!(!matches_list_index("2", 0));
+        assert!(!matches_list_index("wk", 0));
+        assert!(!matches_list_index("", 0));
+        assert!(!matches_list_index("1a", 0));
     }
 }
