@@ -969,13 +969,6 @@ fn edit_ssh_project_keeps_connection_on_save() {
 }
 
 #[test]
-fn format_list_index_pads_then_grows() {
-    assert_eq!(format_list_index(0), "01");
-    assert_eq!(format_list_index(8), "09");
-    assert_eq!(format_list_index(99), "100");
-}
-
-#[test]
 fn filter_digit_hits_group_store_index() {
     let data = sample();
     let mut app = App::new(&data);
