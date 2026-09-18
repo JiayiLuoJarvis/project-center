@@ -4,6 +4,8 @@
 状态：已与用户逐项确认；2026-09-08 按审查结论修订（v2）；2026-09-08 实施审查后修订（v3，见 §11 spike 结论与 §12 偏差修正）
 关联：`docs/spec.md`（§7 启动表实施时补充 SSH 一节）
 
+> 2026-09-18：认证与 host 已迁到可复用 `Connection`（`docs/superpowers/specs/2026-09-18-ssh-connections-design.md`）。`Project` / `DeletedItem` 不再持有 `sshTarget` / `sshKeyFile` / `sshKeyPath` / `sshPasswordEnc` / `sshKeyPassEnc`；秘密只在连接上。下文仍描述 2026-09-08 当时的项目级字段，作迁移基线。
+
 ## 1. 目标与范围
 
 在 `pcs` 中新增「SSH 远程项目」：
