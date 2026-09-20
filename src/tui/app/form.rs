@@ -45,13 +45,62 @@ impl App {
         kind: FormKind,
     ) {
         self.clear_key = false;
+        let cursor = Self::field_end_cursor(&fields, 0);
         self.mode = Mode::Form {
             title: title.into(),
             fields,
             focus: 0,
+            cursor,
             kind,
             error: None,
         };
+    }
+
+    /// 文本/密码字段的字符长度；非编辑字段为 0。
+    pub(crate) fn field_char_len(fields: &[FormField], index: usize) -> usize {
+        match fields.get(index) {
+            Some(FormField::Text { value, .. } | FormField::Password { value, .. }) => {
+                value.chars().count()
+            }
+            _ => 0,
+        }
+    }
+
+    pub(crate) fn field_end_cursor(fields: &[FormField], index: usize) -> usize {
+        Self::field_char_len(fields, index)
+    }
+
+    fn clamp_cursor(fields: &[FormField], index: usize, cursor: usize) -> usize {
+        cursor.min(Self::field_char_len(fields, index))
+    }
+
+    fn insert_char_at(value: &mut String, cursor: usize, c: char) -> usize {
+        let mut chars: Vec<char> = value.chars().collect();
+        let at = cursor.min(chars.len());
+        chars.insert(at, c);
+        *value = chars.into_iter().collect();
+        at + 1
+    }
+
+    fn delete_char_before(value: &mut String, cursor: usize) -> usize {
+        if cursor == 0 {
+            return 0;
+        }
+        let mut chars: Vec<char> = value.chars().collect();
+        let at = cursor.min(chars.len());
+        chars.remove(at - 1);
+        *value = chars.into_iter().collect();
+        at - 1
+    }
+
+    fn delete_char_at(value: &mut String, cursor: usize) -> usize {
+        let mut chars: Vec<char> = value.chars().collect();
+        if cursor >= chars.len() {
+            return cursor.min(chars.len());
+        }
+        chars.remove(cursor);
+        *value = chars.into_iter().collect();
+        cursor
     }
 
     /// 新增/编辑同一布局：本地路径 + 远程连接 + 远程路径。
@@ -209,12 +258,39 @@ impl App {
                 display,
             );
         }
+        let cursor = Self::clamp_cursor(&suspended.fields, suspended.focus, suspended.cursor);
         self.mode = Mode::Form {
             title: suspended.title,
             fields: suspended.fields,
             focus: suspended.focus,
+            cursor,
             kind: suspended.kind,
             error: None,
+        };
+    }
+
+    fn set_form_state(
+        &mut self,
+        title: String,
+        fields: Vec<FormField>,
+        focus: usize,
+        kind: FormKind,
+        cursor: usize,
+        error: Option<String>,
+    ) {
+        let focus = if fields.is_empty() {
+            0
+        } else {
+            focus.min(fields.len() - 1)
+        };
+        let cursor = Self::clamp_cursor(&fields, focus, cursor);
+        self.mode = Mode::Form {
+            title,
+            fields,
+            focus,
+            cursor,
+            kind,
+            error,
         };
     }
 
@@ -228,6 +304,7 @@ impl App {
             title,
             mut fields,
             mut focus,
+            mut cursor,
             kind,
             ..
         } = self.mode.clone()
@@ -239,6 +316,7 @@ impl App {
             return Outcome::Continue;
         }
         focus = focus.min(fields.len() - 1);
+        cursor = Self::clamp_cursor(&fields, focus, cursor);
 
         match key.code {
             KeyCode::Esc => {
@@ -254,42 +332,51 @@ impl App {
             }
             KeyCode::Tab | KeyCode::Down => {
                 focus = (focus + 1) % fields.len();
-                self.mode = Mode::Form {
-                    title,
-                    fields,
-                    focus,
-                    kind,
-                    error: None,
-                };
+                cursor = Self::field_end_cursor(&fields, focus);
+                self.set_form_state(title, fields, focus, kind, cursor, None);
             }
             KeyCode::BackTab | KeyCode::Up => {
                 focus = (focus + fields.len() - 1) % fields.len();
-                self.mode = Mode::Form {
-                    title,
-                    fields,
-                    focus,
-                    kind,
-                    error: None,
-                };
+                cursor = Self::field_end_cursor(&fields, focus);
+                self.set_form_state(title, fields, focus, kind, cursor, None);
+            }
+            KeyCode::Left => {
+                cursor = cursor.saturating_sub(1);
+                self.set_form_state(title, fields, focus, kind, cursor, None);
+            }
+            KeyCode::Right => {
+                cursor = (cursor + 1).min(Self::field_char_len(&fields, focus));
+                self.set_form_state(title, fields, focus, kind, cursor, None);
+            }
+            KeyCode::Home => {
+                cursor = 0;
+                self.set_form_state(title, fields, focus, kind, cursor, None);
+            }
+            KeyCode::End => {
+                cursor = Self::field_end_cursor(&fields, focus);
+                self.set_form_state(title, fields, focus, kind, cursor, None);
             }
             KeyCode::Backspace => {
                 match fields.get_mut(focus) {
                     Some(FormField::Text { value, .. } | FormField::Password { value, .. }) => {
-                        value.pop();
+                        cursor = Self::delete_char_before(value, cursor);
                     }
                     Some(FormField::Select { value, display, .. }) => {
                         value.clear();
                         *display = "（未选择）".into();
+                        cursor = 0;
                     }
                     _ => {}
                 }
-                self.mode = Mode::Form {
-                    title,
-                    fields,
-                    focus,
-                    kind,
-                    error: None,
-                };
+                self.set_form_state(title, fields, focus, kind, cursor, None);
+            }
+            KeyCode::Delete => {
+                if let Some(FormField::Text { value, .. } | FormField::Password { value, .. }) =
+                    fields.get_mut(focus)
+                {
+                    cursor = Self::delete_char_at(value, cursor);
+                }
+                self.set_form_state(title, fields, focus, kind, cursor, None);
             }
             KeyCode::Char('u') | KeyCode::Char('U')
                 if key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -297,34 +384,24 @@ impl App {
                 match fields.get_mut(focus) {
                     Some(FormField::Text { value, .. } | FormField::Password { value, .. }) => {
                         value.clear();
+                        cursor = 0;
                     }
                     Some(FormField::Select { value, display, .. }) => {
                         value.clear();
                         *display = "（未选择）".into();
+                        cursor = 0;
                     }
                     _ => {}
                 }
-                self.mode = Mode::Form {
-                    title,
-                    fields,
-                    focus,
-                    kind,
-                    error: None,
-                };
+                self.set_form_state(title, fields, focus, kind, cursor, None);
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(FormField::Text { value, .. } | FormField::Password { value, .. }) =
                     fields.get_mut(focus)
                 {
-                    value.push(c);
+                    cursor = Self::insert_char_at(value, cursor, c);
                 }
-                self.mode = Mode::Form {
-                    title,
-                    fields,
-                    focus,
-                    kind,
-                    error: None,
-                };
+                self.set_form_state(title, fields, focus, kind, cursor, None);
             }
             KeyCode::Enter => match fields.get(focus) {
                 Some(FormField::Select { .. }) => {
@@ -332,6 +409,7 @@ impl App {
                         title,
                         fields,
                         focus,
+                        cursor,
                         kind,
                     };
                     self.open_connection_picker(data, suspended);
@@ -345,55 +423,33 @@ impl App {
                                 value.clear();
                             }
                             self.clear_key = true;
-                            self.mode = Mode::Form {
-                                title,
-                                fields,
-                                focus: target,
-                                kind,
-                                error: None,
-                            };
+                            cursor = Self::field_end_cursor(&fields, target);
+                            self.set_form_state(title, fields, target, kind, cursor, None);
                         }
                         ButtonAction::PickFolder { target } => {
-                            self.mode = Mode::Form {
-                                title,
-                                fields,
-                                focus,
-                                kind,
-                                error: None,
-                            };
+                            self.set_form_state(title, fields, focus, kind, cursor, None);
                             return Outcome::PickFolder { target };
                         }
                         ButtonAction::PickFile { target } => {
-                            self.mode = Mode::Form {
-                                title,
-                                fields,
-                                focus,
-                                kind,
-                                error: None,
-                            };
+                            self.set_form_state(title, fields, focus, kind, cursor, None);
                             return Outcome::PickFile { target };
                         }
                     }
                 }
                 _ => {
-                    self.mode = Mode::Form {
+                    self.set_form_state(
                         title,
-                        fields: fields.clone(),
+                        fields.clone(),
                         focus,
-                        kind: kind.clone(),
-                        error: None,
-                    };
+                        kind.clone(),
+                        cursor,
+                        None,
+                    );
                     return self.submit_form(kind, &fields, data, config);
                 }
             },
             _ => {
-                self.mode = Mode::Form {
-                    title,
-                    fields,
-                    focus,
-                    kind,
-                    error: None,
-                };
+                self.set_form_state(title, fields, focus, kind, cursor, None);
             }
         }
         Outcome::Continue
@@ -530,6 +586,7 @@ impl App {
             title,
             mut fields,
             focus,
+            cursor,
             kind,
             ..
         } = self.mode.clone()
@@ -558,22 +615,18 @@ impl App {
                         }
                     }
                 }
-                self.mode = Mode::Form {
-                    title,
-                    fields,
-                    focus: target,
-                    kind,
-                    error: None,
-                };
+                let cursor = Self::field_end_cursor(&fields, target);
+                self.set_form_state(title, fields, target, kind, cursor, None);
             }
             None => {
-                self.mode = Mode::Form {
+                self.set_form_state(
                     title,
                     fields,
                     focus,
                     kind,
-                    error: Some("已取消选择文件夹".into()),
-                };
+                    cursor,
+                    Some("已取消选择文件夹".into()),
+                );
             }
         }
     }
@@ -583,6 +636,7 @@ impl App {
             title,
             mut fields,
             focus,
+            cursor,
             kind,
             ..
         } = self.mode.clone()
@@ -595,22 +649,18 @@ impl App {
                     *value = path;
                 }
                 self.clear_key = false;
-                self.mode = Mode::Form {
-                    title,
-                    fields,
-                    focus: target,
-                    kind,
-                    error: None,
-                };
+                let cursor = Self::field_end_cursor(&fields, target);
+                self.set_form_state(title, fields, target, kind, cursor, None);
             }
             None => {
-                self.mode = Mode::Form {
+                self.set_form_state(
                     title,
                     fields,
                     focus,
                     kind,
-                    error: Some("已取消选择文件".into()),
-                };
+                    cursor,
+                    Some("已取消选择文件".into()),
+                );
             }
         }
     }

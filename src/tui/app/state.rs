@@ -165,6 +165,8 @@ pub struct SuspendedForm {
     pub title: String,
     pub fields: Vec<FormField>,
     pub focus: usize,
+    /// 当前焦点文本/密码框内的字符光标下标。
+    pub cursor: usize,
     pub kind: FormKind,
 }
 
@@ -284,6 +286,8 @@ pub enum Mode {
         title: String,
         fields: Vec<FormField>,
         focus: usize,
+        /// 当前焦点文本/密码框内的字符光标下标。
+        cursor: usize,
         kind: FormKind,
         error: Option<String>,
     },

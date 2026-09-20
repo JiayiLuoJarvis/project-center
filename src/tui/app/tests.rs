@@ -570,6 +570,67 @@ fn form_tab_moves_focus_to_browse_button() {
     ));
 }
 
+#[test]
+fn form_text_cursor_moves_and_edits_mid_string() {
+    let mut data = sample();
+    let mut config = AppConfig::defaults();
+    let mut app = App::new(&data);
+    app.focus = Focus::Projects;
+    app.left_sel = 0;
+    app.sync_right_pane(&data);
+    app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
+    type_chars(&mut app, &mut data, &mut config, "abcd");
+    app.handle(key(KeyCode::Left), &mut data, &mut config);
+    app.handle(key(KeyCode::Left), &mut data, &mut config);
+    app.handle(key(KeyCode::Backspace), &mut data, &mut config);
+    app.handle(key(KeyCode::Char('X')), &mut data, &mut config);
+    app.handle(key(KeyCode::Delete), &mut data, &mut config);
+    match &app.mode {
+        Mode::Form {
+            fields, cursor, ..
+        } => {
+            // abcd → ←← → 光标在 c 前 → Backspace 删 b → aXcd → Delete 删 c → aXd
+            assert_eq!(App::field_value(fields, 0), "aXd");
+            assert_eq!(*cursor, 2);
+        }
+        other => panic!("expected form, got {other:?}"),
+    }
+    app.handle(key(KeyCode::Home), &mut data, &mut config);
+    match &app.mode {
+        Mode::Form { cursor, .. } => assert_eq!(*cursor, 0),
+        other => panic!("expected form, got {other:?}"),
+    }
+    app.handle(key(KeyCode::End), &mut data, &mut config);
+    match &app.mode {
+        Mode::Form { cursor, .. } => assert_eq!(*cursor, 3),
+        other => panic!("expected form, got {other:?}"),
+    }
+}
+
+#[test]
+fn form_text_cursor_handles_unicode() {
+    let mut data = sample();
+    let mut config = AppConfig::defaults();
+    let mut app = App::new(&data);
+    app.focus = Focus::Projects;
+    app.left_sel = 0;
+    app.sync_right_pane(&data);
+    app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
+    type_chars(&mut app, &mut data, &mut config, "中文路径");
+    app.handle(key(KeyCode::Home), &mut data, &mut config);
+    app.handle(key(KeyCode::Right), &mut data, &mut config);
+    app.handle(key(KeyCode::Delete), &mut data, &mut config);
+    match &app.mode {
+        Mode::Form {
+            fields, cursor, ..
+        } => {
+            assert_eq!(App::field_value(fields, 0), "中路径");
+            assert_eq!(*cursor, 1);
+        }
+        other => panic!("expected form, got {other:?}"),
+    }
+}
+
 fn seed_connection(
     data: &mut ProjectData,
     name: &str,

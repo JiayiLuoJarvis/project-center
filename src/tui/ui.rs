@@ -60,9 +60,10 @@ pub fn render(frame: &mut Frame, app: &App, data: &ProjectData, config: &AppConf
             title,
             fields,
             focus,
+            cursor,
             error,
             ..
-        } => render_form(frame, area, title, fields, *focus, error.as_deref()),
+        } => render_form(frame, area, title, fields, *focus, *cursor, error.as_deref()),
         Mode::Filter => render_input(frame, chunks[2], "/", &app.filter, true),
         Mode::Browse => {}
     }
@@ -549,6 +550,7 @@ fn render_form(
     title: &str,
     fields: &[FormField],
     focus: usize,
+    cursor: usize,
     error: Option<&str>,
 ) {
     let area = modal_area(area);
@@ -572,27 +574,23 @@ fn render_form(
                     theme::muted()
                 };
                 lines.push(Line::from(Span::styled(label.clone(), label_style)));
-                let mut spans = vec![
-                    Span::styled(
-                        if focused { "▶ " } else { "  " },
-                        if focused {
-                            theme::accent()
-                        } else {
-                            theme::muted()
-                        },
-                    ),
-                    Span::styled(
-                        value.clone(),
-                        if focused {
-                            theme::selected()
-                        } else {
-                            theme::base()
-                        },
-                    ),
-                ];
-                if focused {
-                    spans.push(Span::styled("█", theme::accent()));
-                }
+                let mut spans = vec![Span::styled(
+                    if focused { "▶ " } else { "  " },
+                    if focused {
+                        theme::accent()
+                    } else {
+                        theme::muted()
+                    },
+                )];
+                spans.extend(value_spans_with_cursor(
+                    value,
+                    if focused { Some(cursor) } else { None },
+                    if focused {
+                        theme::selected()
+                    } else {
+                        theme::base()
+                    },
+                ));
                 lines.push(Line::from(spans));
             }
             FormField::Password {
@@ -607,35 +605,46 @@ fn render_form(
                 };
                 lines.push(Line::from(Span::styled(label.clone(), label_style)));
                 let len = value.chars().count();
-                let masked = if len == 0 {
-                    empty_hint.clone()
+                let mut spans = vec![Span::styled(
+                    if focused { "▶ " } else { "  " },
+                    if focused {
+                        theme::accent()
+                    } else {
+                        theme::muted()
+                    },
+                )];
+                if len == 0 {
+                    if focused {
+                        spans.push(Span::styled("█", theme::accent()));
+                    }
+                    spans.push(Span::styled(
+                        empty_hint.clone(),
+                        if focused {
+                            theme::muted()
+                        } else {
+                            theme::base()
+                        },
+                    ));
                 } else {
-                    format!(
+                    let masked = format!(
                         "{}{}",
                         "*".repeat(len.min(16)),
                         if len > 16 { "…" } else { "" }
-                    )
-                };
-                let mut spans = vec![
-                    Span::styled(
-                        if focused { "▶ " } else { "  " },
-                        if focused {
-                            theme::accent()
-                        } else {
-                            theme::muted()
-                        },
-                    ),
-                    Span::styled(
-                        masked,
+                    );
+                    let visual_cursor = if focused {
+                        Some(cursor.min(len.min(16)))
+                    } else {
+                        None
+                    };
+                    spans.extend(value_spans_with_cursor(
+                        &masked,
+                        visual_cursor,
                         if focused {
                             theme::selected()
                         } else {
                             theme::base()
                         },
-                    ),
-                ];
-                if focused {
-                    spans.push(Span::styled("█", theme::accent()));
+                    ));
                 }
                 lines.push(Line::from(spans));
             }
@@ -677,7 +686,7 @@ fn render_form(
         lines.push(Line::from(""));
     }
     lines.push(Line::from(Span::styled(
-        "Tab 切换  Enter 提交/确认  Ctrl+U 清空  Esc 取消",
+        "←→ 光标  Tab 切换  Enter 提交/确认  Ctrl+U 清空  Esc 取消",
         theme::muted(),
     )));
 
@@ -691,6 +700,26 @@ fn render_form(
             .style(theme::base()),
         inner,
     );
+}
+
+/// 在 `cursor` 字符位置插入块光标；`None` 表示不显示光标。
+fn value_spans_with_cursor(value: &str, cursor: Option<usize>, style: Style) -> Vec<Span<'static>> {
+    let Some(cursor) = cursor else {
+        return vec![Span::styled(value.to_string(), style)];
+    };
+    let chars: Vec<char> = value.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let before: String = chars[..cursor].iter().collect();
+    let after: String = chars[cursor..].iter().collect();
+    let mut spans = Vec::new();
+    if !before.is_empty() {
+        spans.push(Span::styled(before, style));
+    }
+    spans.push(Span::styled("█", theme::accent()));
+    if !after.is_empty() {
+        spans.push(Span::styled(after, style));
+    }
+    spans
 }
 
 /// 表单滚动偏移：按 `inner_width` 量折行后的真实行高，保证焦点字段整块可见。
