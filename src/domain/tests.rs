@@ -233,6 +233,44 @@ fn add_project_command_stores_canonical_env() {
     // 非法 env 视为 ide
     add_project_command(&mut data, &id, Some("Work"), "检查", "bash", "echo hi").unwrap();
     assert_eq!(data.groups[0].projects[0].commands[1].env, "ide");
+    add_project_command(&mut data, &id, Some("Work"), "部署", "SSH", "make deploy").unwrap();
+    assert_eq!(data.groups[0].projects[0].commands[2].env, "ssh");
+}
+
+#[test]
+fn add_project_command_forces_ssh_env_on_ssh_project() {
+    let mut data = data();
+    data.groups[0].projects[0].connection_id = "cid".into();
+    let id = data.groups[0].projects[0].id.clone();
+    add_project_command(&mut data, &id, Some("Work"), "部署", "wsl", "make deploy").unwrap();
+    assert_eq!(data.groups[0].projects[0].commands[0].env, "ssh");
+    assert_eq!(
+        data.groups[0].projects[0].commands[0].command,
+        "make deploy"
+    );
+}
+
+#[test]
+fn edit_project_command_forces_ssh_env_on_ssh_project() {
+    let mut data = data();
+    let id = data.groups[0].projects[0].id.clone();
+    add_project_command(&mut data, &id, Some("Work"), "部署", "wsl", "make").unwrap();
+    data.groups[0].projects[0].connection_id = "cid".into();
+    edit_project_command(
+        &mut data,
+        &id,
+        Some("Work"),
+        0,
+        "部署",
+        "powershell",
+        "make deploy",
+    )
+    .unwrap();
+    assert_eq!(data.groups[0].projects[0].commands[0].env, "ssh");
+    assert_eq!(
+        data.groups[0].projects[0].commands[0].command,
+        "make deploy"
+    );
 }
 
 #[test]

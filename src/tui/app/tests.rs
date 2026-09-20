@@ -1190,3 +1190,25 @@ fn recent_picker_space_opens_launch_picker() {
         }
     });
 }
+
+#[test]
+fn add_command_on_ssh_project_skips_env_picker() {
+    let mut data = sample();
+    let mut config = AppConfig::defaults();
+    data.groups[0].projects[0].connection_id = "cid".into();
+    let id = data.groups[0].projects[0].id.clone();
+    let mut app = App::new(&data);
+    app.focus = Focus::Projects;
+    app.right_pane = RightPane::Commands {
+        group: "dev".into(),
+        project_id: id,
+    };
+    app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
+    match &app.mode {
+        Mode::Form {
+            kind: FormKind::AddCommand { env, .. },
+            ..
+        } => assert_eq!(env, "ssh"),
+        other => panic!("expected AddCommand form with env ssh, got {other:?}"),
+    }
+}

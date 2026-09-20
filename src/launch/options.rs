@@ -33,15 +33,26 @@ fn push_terminal(options: &mut Vec<LaunchOption>, env: LaunchEnv) {
     });
 }
 
-/// 构建项目的全部启动选项：SSH 项目只有「SSH · 终端」一项；
+/// 构建项目的全部启动选项：SSH 项目为「SSH · 终端」再追加 `env=ssh` 自定义命令；
 /// 其余项目：WSL（终端 + config.wsl）；
 /// 有 Windows 路径时追加 PowerShell（终端 + config.powershell）、IDE（config.ide）、文件夹；
 /// 尾部追加项目自定义命令段。
 pub fn build_launch_options(project: &Project, config: &AppConfig) -> Vec<LaunchOption> {
     let mut options = Vec::new();
     if project.is_ssh_project() {
-        // SSH 远程项目：仅 SSH 终端，忽略本地/WSL 路径与自定义命令。
         push_terminal(&mut options, LaunchEnv::Ssh);
+        options.extend(
+            project
+                .commands
+                .iter()
+                .filter(|command| LaunchEnv::from_command_env(&command.env) == LaunchEnv::Ssh)
+                .map(|command| LaunchOption {
+                    env: LaunchEnv::Ssh,
+                    tool_name: command.name.clone(),
+                    command: command.command.clone(),
+                    is_custom: true,
+                }),
+        );
         return options;
     }
     push_terminal(&mut options, LaunchEnv::Wsl);
@@ -152,21 +163,23 @@ mod tests {
     }
 
     #[test]
-    fn build_options_ssh_project_single_terminal() {
+    fn build_options_ssh_project_terminal_and_ssh_custom() {
         let mut p = Project::new("srv", "/opt/x", "").with_connection("cid");
-        // SSH 项目即使有自定义命令与默认工具也只产出「SSH · 终端」
-        p.commands = vec![ProjectCommand::new("构建", "wsl", "make")];
-        p.default_tool = "构建".into();
+        p.commands = vec![
+            ProjectCommand::new("构建", "wsl", "make"),
+            ProjectCommand::new("部署", "ssh", "make deploy"),
+        ];
+        p.default_tool = "部署".into();
         let opts = build_launch_options(&p, &cfg());
-        assert_eq!(opts.len(), 1);
+        assert_eq!(opts.len(), 2);
         assert_eq!(opts[0].env, LaunchEnv::Ssh);
         assert_eq!(opts[0].tool_name, "终端");
         assert_eq!(opts[0].label(), "SSH · 终端");
-        assert_eq!(
-            default_option_index(&opts, &p),
-            None,
-            "默认工具不命中 SSH 项"
-        );
+        assert_eq!(opts[1].label(), "⚙ 部署 (ssh)");
+        assert!(opts[1].is_custom);
+        assert_eq!(opts[1].command, "make deploy");
+        assert!(!opts.iter().any(|opt| opt.tool_name == "构建"));
+        assert_eq!(default_option_index(&opts, &p), Some(1));
     }
 
     #[test]

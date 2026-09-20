@@ -26,7 +26,7 @@ impl LaunchEnv {
         }
     }
 
-    /// 自定义命令显示用短标签：wsl / ps / ide。
+    /// 自定义命令显示用短标签：wsl / ps / ide / ssh。
     pub fn short_label(self) -> &'static str {
         match self {
             Self::Wsl => "wsl",
@@ -65,12 +65,15 @@ impl LaunchEnv {
         }
     }
 
-    /// 解析项目自定义命令的 env 字符串：wsl / powershell / ide（大小写不敏感），空或非法视为 ide。
+    /// 解析项目自定义命令的 env 字符串：wsl / powershell / ide / ssh（大小写不敏感），空或非法视为 ide。
+    /// 与 `domain::command::canonical_env` 共用同一套词表。
     pub fn from_command_env(env: &str) -> LaunchEnv {
         if env.eq_ignore_ascii_case("wsl") {
             Self::Wsl
         } else if env.eq_ignore_ascii_case("powershell") {
             Self::PowerShell
+        } else if env.eq_ignore_ascii_case("ssh") {
+            Self::Ssh
         } else {
             Self::Ide
         }
@@ -185,9 +188,14 @@ fn spawn_explorer(p: &Project) -> super::Result<std::process::Child> {
 
 /// 构造 ssh 参数：从 Connection 取 user/host/port；项目 path 作为远程 cwd。
 /// 默认端口 22 不传 `-p`（与 OpenSSH 缺省一致）。
-/// `[-p port] [-i key] user@host [-t "cd '<path>' 2>/dev/null; exec $SHELL"]`。
-/// 远程路径用 `;` 串联（cd 失败静默落到默认 shell，不断连）。
-fn ssh_args(connection: &Connection, key_path: Option<&str>, remote_path: &str) -> Vec<String> {
+/// `remote_command` 空：交互终端（path 非空时静默 cd，失败仍进默认 shell）。
+/// `remote_command` 非空：一锤子（path 非空时 `cd &&`，cd 失败即非零退出）。
+fn ssh_args(
+    connection: &Connection,
+    key_path: Option<&str>,
+    remote_path: &str,
+    remote_command: &str,
+) -> Vec<String> {
     let mut args: Vec<String> = Vec::new();
     if connection.port != 22 {
         args.push("-p".into());
@@ -199,10 +207,21 @@ fn ssh_args(connection: &Connection, key_path: Option<&str>, remote_path: &str) 
     }
     args.push(connection.userhost());
     let remote = remote_path.trim();
-    if !remote.is_empty() {
-        let escaped = remote.replace('\'', "''");
+    let cmd = remote_command.trim();
+    if cmd.is_empty() {
+        if !remote.is_empty() {
+            let escaped = remote.replace('\'', "''");
+            args.push("-t".into());
+            args.push(format!("cd '{escaped}' 2>/dev/null; exec $SHELL"));
+        }
+    } else {
         args.push("-t".into());
-        args.push(format!("cd '{escaped}' 2>/dev/null; exec $SHELL"));
+        if remote.is_empty() {
+            args.push(cmd.to_string());
+        } else {
+            let escaped = remote.replace('\'', "''");
+            args.push(format!("cd '{escaped}' && {cmd}"));
+        }
     }
     args
 }
@@ -313,11 +332,12 @@ fn resolve_ssh<'a>(data: &'a ProjectData, p: &Project) -> super::Result<&'a Conn
 }
 
 /// 用连接认证启动 ssh：args 来自 Connection user/host/port，远程 cwd 为项目 path。
-/// askpass 的 `PCS_ASKPASS_ID` 是连接 id。
+/// `command` 空走交互终端，非空走一锤子；askpass 的 `PCS_ASKPASS_ID` 是连接 id。
 pub fn spawn_ssh(
     connection: &Connection,
     remote_path: &str,
     title: &str,
+    command: &str,
 ) -> super::Result<SpawnedDirect> {
     apply_console_title(title);
 
@@ -350,7 +370,12 @@ pub fn spawn_ssh(
     }
 
     let mut cmd = Command::new("ssh");
-    cmd.args(ssh_args(connection, key_arg.as_deref(), remote_path));
+    cmd.args(ssh_args(
+        connection,
+        key_arg.as_deref(),
+        remote_path,
+        command,
+    ));
 
     // askpass 自动填充：按决策注入；env 只携带连接 id 与一次性 token，
     // 秘密由 __askpass 自行解密。主机未知（首连）时跳过注入走交互。
@@ -435,7 +460,7 @@ pub fn spawn_direct(
 ) -> super::Result<SpawnedDirect> {
     if env == LaunchEnv::Ssh {
         let connection = resolve_ssh(data, p)?;
-        return spawn_ssh(connection, &p.path, &console_title(p, group_name));
+        return spawn_ssh(connection, &p.path, &console_title(p, group_name), command);
     }
     if matches!(
         env,
@@ -559,6 +584,8 @@ mod tests {
         );
         assert_eq!(LaunchEnv::from_command_env("ide"), LaunchEnv::Ide);
         assert_eq!(LaunchEnv::from_command_env("IDE"), LaunchEnv::Ide);
+        assert_eq!(LaunchEnv::from_command_env("ssh"), LaunchEnv::Ssh);
+        assert_eq!(LaunchEnv::from_command_env("SSH"), LaunchEnv::Ssh);
     }
 
     #[test]
@@ -661,11 +688,11 @@ mod tests {
     #[test]
     fn ssh_args_from_connection() {
         assert_eq!(
-            ssh_args(&conn("abc", "192.0.2.10", 22), None, ""),
+            ssh_args(&conn("abc", "192.0.2.10", 22), None, "", ""),
             vec!["abc@192.0.2.10"]
         );
         assert_eq!(
-            ssh_args(&conn("abc", "h", 2222), None, "/opt/foo"),
+            ssh_args(&conn("abc", "h", 2222), None, "/opt/foo", ""),
             vec![
                 "-p",
                 "2222",
@@ -675,14 +702,34 @@ mod tests {
             ]
         );
         assert_eq!(
-            ssh_args(&conn("abc", "h", 22), Some("C:\\tmp\\k.key"), ""),
+            ssh_args(&conn("abc", "h", 22), Some("C:\\tmp\\k.key"), "", ""),
             vec!["-i", "C:\\tmp\\k.key", "abc@h"]
         );
-        assert_eq!(ssh_args(&conn("", "h", 22), None, ""), vec!["h"]);
+        assert_eq!(ssh_args(&conn("", "h", 22), None, "", ""), vec!["h"]);
         // 路径含单引号转义
         assert_eq!(
-            ssh_args(&conn("abc", "h", 22), None, "/opt/i't's"),
+            ssh_args(&conn("abc", "h", 22), None, "/opt/i't's", ""),
             vec!["abc@h", "-t", "cd '/opt/i''t''s' 2>/dev/null; exec $SHELL"]
+        );
+    }
+
+    #[test]
+    fn ssh_args_one_shot_command() {
+        assert_eq!(
+            ssh_args(&conn("abc", "h", 22), None, "", "htop"),
+            vec!["abc@h", "-t", "htop"]
+        );
+        assert_eq!(
+            ssh_args(&conn("abc", "h", 22), None, "/opt/foo", "make deploy"),
+            vec!["abc@h", "-t", "cd '/opt/foo' && make deploy"]
+        );
+        assert_eq!(
+            ssh_args(&conn("abc", "h", 2222), None, "/opt/foo", "make"),
+            vec!["-p", "2222", "abc@h", "-t", "cd '/opt/foo' && make"]
+        );
+        assert_eq!(
+            ssh_args(&conn("abc", "h", 22), None, "/opt/i't's", "make"),
+            vec!["abc@h", "-t", "cd '/opt/i''t''s' && make"]
         );
     }
 

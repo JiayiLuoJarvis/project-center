@@ -355,17 +355,34 @@ impl App {
                 );
             }
             RightPane::Commands { group, project_id } => {
-                self.mode = Mode::ListPicker {
-                    title: "运行环境".into(),
-                    items: vec!["WSL".into(), "PowerShell".into(), "IDE".into()],
-                    selected: 0,
-                    kind: ListKind::CommandEnv {
-                        group,
-                        project_id,
-                        edit_index: None,
-                        name: String::new(),
-                    },
-                };
+                if actions::find_project_ref(data, &group, &project_id)
+                    .is_some_and(|p| p.is_ssh_project())
+                {
+                    self.open_form(
+                        "新增命令",
+                        vec![
+                            Self::text_field("命令名称", ""),
+                            Self::text_field("启动命令", ""),
+                        ],
+                        FormKind::AddCommand {
+                            group,
+                            project_id,
+                            env: "ssh".into(),
+                        },
+                    );
+                } else {
+                    self.mode = Mode::ListPicker {
+                        title: "运行环境".into(),
+                        items: vec!["WSL".into(), "PowerShell".into(), "IDE".into()],
+                        selected: 0,
+                        kind: ListKind::CommandEnv {
+                            group,
+                            project_id,
+                            edit_index: None,
+                            name: String::new(),
+                        },
+                    };
+                }
             }
             RightPane::Trash => self.flash("回收站不支持新增"),
             RightPane::ConfigEnvs => self.flash("请先进入环境工具列表"),
@@ -443,21 +460,37 @@ impl App {
                     return;
                 };
                 let cmd = &project.commands[ci];
-                self.mode = Mode::ListPicker {
-                    title: "运行环境".into(),
-                    items: vec!["WSL".into(), "PowerShell".into(), "IDE".into()],
-                    selected: match cmd.env.as_str() {
-                        "powershell" => 1,
-                        "ide" => 2,
-                        _ => 0,
-                    },
-                    kind: ListKind::CommandEnv {
-                        group,
-                        project_id,
-                        edit_index: Some(ci),
-                        name: cmd.name.clone(),
-                    },
-                };
+                if project.is_ssh_project() {
+                    self.open_form(
+                        "编辑命令",
+                        vec![
+                            Self::text_field("命令名称", cmd.name.clone()),
+                            Self::text_field("启动命令", cmd.command.clone()),
+                        ],
+                        FormKind::EditCommand {
+                            group,
+                            project_id,
+                            index: ci,
+                            env: "ssh".into(),
+                        },
+                    );
+                } else {
+                    self.mode = Mode::ListPicker {
+                        title: "运行环境".into(),
+                        items: vec!["WSL".into(), "PowerShell".into(), "IDE".into()],
+                        selected: match cmd.env.as_str() {
+                            "powershell" => 1,
+                            "ide" => 2,
+                            _ => 0,
+                        },
+                        kind: ListKind::CommandEnv {
+                            group,
+                            project_id,
+                            edit_index: Some(ci),
+                            name: cmd.name.clone(),
+                        },
+                    };
+                }
             }
             _ => self.flash("当前上下文不支持编辑"),
         }

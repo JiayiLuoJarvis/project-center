@@ -237,21 +237,37 @@ impl App {
                     if let Some(project) = actions::find_project_ref(data, &group, &project_id)
                         && let Some(cmd) = project.commands.get(index)
                     {
-                        self.mode = Mode::ListPicker {
-                            title: "运行环境".into(),
-                            items: vec!["WSL".into(), "PowerShell".into(), "IDE".into()],
-                            selected: match cmd.env.as_str() {
-                                "powershell" => 1,
-                                "ide" => 2,
-                                _ => 0,
-                            },
-                            kind: ListKind::CommandEnv {
-                                group,
-                                project_id,
-                                edit_index: Some(index),
-                                name: cmd.name.clone(),
-                            },
-                        };
+                        if project.is_ssh_project() {
+                            self.open_form(
+                                "编辑命令",
+                                vec![
+                                    Self::text_field("命令名称", cmd.name.clone()),
+                                    Self::text_field("启动命令", cmd.command.clone()),
+                                ],
+                                FormKind::EditCommand {
+                                    group,
+                                    project_id,
+                                    index,
+                                    env: "ssh".into(),
+                                },
+                            );
+                        } else {
+                            self.mode = Mode::ListPicker {
+                                title: "运行环境".into(),
+                                items: vec!["WSL".into(), "PowerShell".into(), "IDE".into()],
+                                selected: match cmd.env.as_str() {
+                                    "powershell" => 1,
+                                    "ide" => 2,
+                                    _ => 0,
+                                },
+                                kind: ListKind::CommandEnv {
+                                    group,
+                                    project_id,
+                                    edit_index: Some(index),
+                                    name: cmd.name.clone(),
+                                },
+                            };
+                        }
                     }
                 }
                 1 => {
