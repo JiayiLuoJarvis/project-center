@@ -102,6 +102,10 @@ impl App {
                 self.restore_selected_trash(data);
                 return Outcome::Continue;
             }
+            KeyCode::Char('r') => {
+                self.open_recent_picker(data);
+                return Outcome::Continue;
+            }
             KeyCode::Char('D') if matches!(self.right_pane, RightPane::Trash) => {
                 self.mode = Mode::Confirm {
                     message: "确认清空回收站？ y/N".into(),

@@ -35,6 +35,11 @@ pub fn render(frame: &mut Frame, app: &App, data: &ProjectData, config: &AppConf
             filter,
             ..
         } => render_launch_picker(frame, area, options, labels, *selected, filter),
+        Mode::RecentPicker {
+            records,
+            selected,
+            filter,
+        } => render_recent_picker(frame, area, data, records, *selected, filter),
         Mode::ActionMenu {
             items, selected, ..
         } => render_modal_list(frame, area, "操作", items, *selected),
@@ -63,7 +68,15 @@ pub fn render(frame: &mut Frame, app: &App, data: &ProjectData, config: &AppConf
             cursor,
             error,
             ..
-        } => render_form(frame, area, title, fields, *focus, *cursor, error.as_deref()),
+        } => render_form(
+            frame,
+            area,
+            title,
+            fields,
+            *focus,
+            *cursor,
+            error.as_deref(),
+        ),
         Mode::Filter => render_input(frame, chunks[2], "/", &app.filter, true),
         Mode::Browse => {}
     }
@@ -287,7 +300,7 @@ fn render_bottom(frame: &mut Frame, area: Rect, app: &App) {
         }
         RightPane::Commands { .. } => "enter/o 操作  a 新增  e 编辑  d 删除  Esc 返回  q 退出",
         RightPane::Projects => {
-            "enter 打开  o 操作  a 新增  e 编辑  d 删除  m 移动  , 设置  / 过滤  ? 帮助  q 退出"
+            "enter 打开  o 操作  a 新增  e 编辑  d 删除  m 移动  r 最近  , 设置  / 过滤  ? 帮助  q 退出"
         }
     };
     let line = Line::from(vec![
@@ -373,6 +386,69 @@ fn render_launch_picker(
         indices
             .iter()
             .map(|&i| labels.get(i).cloned().unwrap_or_else(|| options[i].label()))
+            .map(widgets::simple_item)
+            .collect()
+    };
+    let mut state = ListState::default();
+    if !indices.is_empty() {
+        let pos = indices.iter().position(|&i| i == selected).unwrap_or(0);
+        state.select(Some(pos));
+    }
+    let list = List::new(list_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(theme::border(true))
+                .style(theme::panel()),
+        )
+        .highlight_style(widgets::selected_style())
+        .highlight_symbol("▶ ");
+    frame.render_stateful_widget(list, chunks[1], &mut state);
+}
+
+fn render_recent_picker(
+    frame: &mut Frame,
+    area: Rect,
+    data: &ProjectData,
+    records: &[crate::persist::RecentRecord],
+    selected: usize,
+    filter: &str,
+) {
+    let area = modal_area(area);
+    frame.render_widget(Clear, area);
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(3)])
+        .split(area);
+    let filter_line = if filter.is_empty() {
+        " 过滤: █  （直接输入）".to_string()
+    } else {
+        format!(" 过滤: {filter}█")
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(filter_line, theme::accent())))
+            .block(
+                Block::default()
+                    .title(Span::styled(" 最近打开 ", theme::title()))
+                    .borders(Borders::ALL)
+                    .border_style(theme::border(true))
+                    .style(theme::panel()),
+            )
+            .style(theme::base()),
+        chunks[0],
+    );
+    let indices = App::recent_visible_indices(records, data, filter);
+    let list_items: Vec<ListItem> = if indices.is_empty() {
+        let empty = if filter.is_empty() {
+            "（无最近打开）"
+        } else {
+            "（无匹配）"
+        };
+        vec![widgets::simple_item(empty)]
+    } else {
+        indices
+            .iter()
+            .filter_map(|&i| App::recent_row_label(&records[i], data))
             .map(widgets::simple_item)
             .collect()
     };

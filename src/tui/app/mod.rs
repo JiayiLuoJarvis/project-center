@@ -12,6 +12,7 @@ mod confirm;
 mod filter;
 mod form;
 mod launch;
+mod recent;
 mod secret_viewer;
 mod state;
 
@@ -231,6 +232,7 @@ impl App {
             Mode::Browse => self.handle_browse(key, data, config),
             Mode::SettingsMenu { .. } => self.handle_settings_menu(key),
             Mode::LaunchPicker { .. } => self.handle_launch_picker(key, data),
+            Mode::RecentPicker { .. } => self.handle_recent_picker(key, data, config),
             Mode::ActionMenu { .. } => self.handle_action_menu(key, data, config),
             Mode::ListPicker { .. } => self.handle_list_picker(key, data, config),
             Mode::Form { .. } => self.handle_form(key, data, config),

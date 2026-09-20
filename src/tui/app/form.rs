@@ -437,14 +437,7 @@ impl App {
                     }
                 }
                 _ => {
-                    self.set_form_state(
-                        title,
-                        fields.clone(),
-                        focus,
-                        kind.clone(),
-                        cursor,
-                        None,
-                    );
+                    self.set_form_state(title, fields.clone(), focus, kind.clone(), cursor, None);
                     return self.submit_form(kind, &fields, data, config);
                 }
             },

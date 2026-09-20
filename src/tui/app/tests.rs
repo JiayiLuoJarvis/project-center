@@ -2,6 +2,7 @@ use super::*;
 use crate::domain::models::{
     Connection, DeletedItem, Endpoint, Group, Project, ProjectCommand, rfc3339_now,
 };
+use crate::persist::RecentRecord;
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -586,9 +587,7 @@ fn form_text_cursor_moves_and_edits_mid_string() {
     app.handle(key(KeyCode::Char('X')), &mut data, &mut config);
     app.handle(key(KeyCode::Delete), &mut data, &mut config);
     match &app.mode {
-        Mode::Form {
-            fields, cursor, ..
-        } => {
+        Mode::Form { fields, cursor, .. } => {
             // abcd → ←← → 光标在 c 前 → Backspace 删 b → aXcd → Delete 删 c → aXd
             assert_eq!(App::field_value(fields, 0), "aXd");
             assert_eq!(*cursor, 2);
@@ -621,9 +620,7 @@ fn form_text_cursor_handles_unicode() {
     app.handle(key(KeyCode::Right), &mut data, &mut config);
     app.handle(key(KeyCode::Delete), &mut data, &mut config);
     match &app.mode {
-        Mode::Form {
-            fields, cursor, ..
-        } => {
+        Mode::Form { fields, cursor, .. } => {
             assert_eq!(App::field_value(fields, 0), "中路径");
             assert_eq!(*cursor, 1);
         }
@@ -1050,10 +1047,11 @@ fn filter_digit_hits_group_store_index() {
 #[test]
 fn filter_digit_hits_project_store_index() {
     let mut data = sample();
-    data.groups[0].projects = vec![
-        Project::new("alpha", r"E:\a", ""),
-        Project::new("beta", r"E:\b", ""),
-    ];
+    let mut alpha = Project::new("alpha", r"E:\a", "");
+    let mut beta = Project::new("beta", r"E:\b", "");
+    alpha.id = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into();
+    beta.id = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb".into();
+    data.groups[0].projects = vec![alpha, beta];
     let mut app = App::new(&data);
     app.focus = Focus::Projects;
     app.left_sel = 0;
@@ -1087,4 +1085,108 @@ fn filter_alias_wk_does_not_take_index_branch() {
     app.left_sel = 0;
     app.filter = "wk".into();
     assert_eq!(app.filtered_project_indices(&data, 0), vec![0]);
+}
+
+fn recent_record(id: &str, env: &str, tool: &str, command: &str) -> RecentRecord {
+    RecentRecord {
+        id: id.into(),
+        ts: 1,
+        env: env.into(),
+        tool_name: tool.into(),
+        command: command.into(),
+    }
+}
+
+fn with_recent(records: &[RecentRecord], f: impl FnOnce()) {
+    let _lock = crate::persist::test_env::lock_appdata();
+    let dir = std::env::temp_dir().join(format!("pcs_recent_tui_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let saved = std::env::var_os("PCS_DATA_DIR");
+    unsafe { std::env::set_var("PCS_DATA_DIR", &dir) };
+    crate::persist::save_recent_to(records, &crate::persist::recent_file_path()).unwrap();
+    f();
+    unsafe {
+        match saved {
+            Some(value) => std::env::set_var("PCS_DATA_DIR", value),
+            None => std::env::remove_var("PCS_DATA_DIR"),
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn browse_r_opens_recent_picker() {
+    let mut data = sample();
+    let mut config = AppConfig::defaults();
+    let mut app = App::new(&data);
+    app.focus = Focus::Projects;
+    app.handle(key(KeyCode::Char('r')), &mut data, &mut config);
+    assert!(matches!(app.mode, Mode::RecentPicker { .. }));
+}
+
+#[test]
+fn browse_trash_r_stays_restore() {
+    let mut data = sample();
+    data.trash.push(DeletedItem {
+        id: "id-gone".into(),
+        kind: "project".into(),
+        group: "dev".into(),
+        name: "gone".into(),
+        ..Default::default()
+    });
+    with_recent(&[], || {
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.right_pane = RightPane::Trash;
+        app.handle(key(KeyCode::Char('r')), &mut data, &mut config);
+        assert!(matches!(app.mode, Mode::Browse));
+        assert!(data.trash.is_empty());
+        assert!(data.groups[0].projects.iter().any(|p| p.name == "gone"));
+    });
+}
+
+#[test]
+fn recent_picker_enter_launches_recorded_option() {
+    let mut data = sample();
+    let id = data.groups[0].projects[0].id.clone();
+    let record = recent_record(&id, "wsl", "终端", "");
+    with_recent(&[record], || {
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.handle(key(KeyCode::Char('r')), &mut data, &mut config);
+        match app.handle(key(KeyCode::Enter), &mut data, &mut config) {
+            Outcome::Launch { option, group, .. } => {
+                assert_eq!(group, "dev");
+                assert_eq!(option.env, crate::launch::LaunchEnv::Wsl);
+                assert_eq!(option.tool_name, "终端");
+                assert_eq!(option.command, "");
+            }
+            other => panic!("expected Launch, got {other:?}"),
+        }
+    });
+}
+
+#[test]
+fn recent_picker_space_opens_launch_picker() {
+    let mut data = sample();
+    let id = data.groups[0].projects[0].id.clone();
+    let record = recent_record(&id, "wsl", "终端", "");
+    with_recent(&[record], || {
+        let mut config = AppConfig::defaults();
+        let mut app = App::new(&data);
+        app.focus = Focus::Projects;
+        app.handle(key(KeyCode::Char('r')), &mut data, &mut config);
+        app.handle(key(KeyCode::Char(' ')), &mut data, &mut config);
+        match &app.mode {
+            Mode::LaunchPicker {
+                group, project_id, ..
+            } => {
+                assert_eq!(group, "dev");
+                assert_eq!(project_id, &id);
+            }
+            other => panic!("expected LaunchPicker, got {other:?}"),
+        }
+    });
 }

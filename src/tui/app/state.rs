@@ -1,6 +1,6 @@
 use crate::domain::models::Project;
 use crate::launch::LaunchOption;
-use crate::persist::ConfigEnv;
+use crate::persist::{ConfigEnv, RecentRecord};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Focus {
@@ -268,6 +268,12 @@ pub enum Mode {
         project_id: String,
         options: Vec<LaunchOption>,
         labels: Vec<String>,
+        selected: usize,
+        filter: String,
+    },
+    RecentPicker {
+        records: Vec<RecentRecord>,
+        /// 未过滤的 `records` 下标，语义对齐 `LaunchPicker.selected`。
         selected: usize,
         filter: String,
     },

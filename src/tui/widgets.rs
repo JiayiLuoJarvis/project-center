@@ -194,6 +194,7 @@ pub fn help_lines() -> Vec<Line<'static>> {
         Line::from("表单: Tab 切换字段  Enter 提交/选连接  Esc 取消"),
         Line::from("项目表单「远程连接」Enter 打开选择器，末项可新建"),
         Line::from("启动方式: 直接输入过滤  j/k 移动  Esc 清过滤/返回"),
+        Line::from("最近: r 打开  Enter 直启  Space 选方式"),
         Line::from("别名: 分组/项目可设 alias，过滤与 CLI 可用"),
         Line::from(""),
         Line::from("回收站: r 恢复  D 清空"),
