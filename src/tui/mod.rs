@@ -121,9 +121,7 @@ fn do_launch(
     group: &str,
     option: &crate::launch::LaunchOption,
 ) -> Result<i32> {
-    let spawned = launcher::spawn_direct(data, project, group, option.env, &option.command)
-        .map_err(anyhow::Error::msg)?;
-    launcher::wait_spawned(spawned).map_err(anyhow::Error::msg)
+    launcher::launch(data, project, group, option).map_err(anyhow::Error::msg)
 }
 
 /// ssh 非零退出时在控制台暂停，让报错可读；按 Enter 返回 TUI。

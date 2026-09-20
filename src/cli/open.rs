@@ -1,7 +1,7 @@
 use anyhow::{Result, bail};
 
 use crate::launch as launcher;
-use crate::launch::LaunchEnv;
+use crate::launch::{LaunchEnv, LaunchOption};
 use crate::persist::{AppConfig, Config, Store};
 use crate::tui;
 
@@ -16,21 +16,19 @@ pub(crate) fn cmd_open(args: OpenArgs) -> Result<()> {
     let group_name = data.groups[group_index].name.clone();
     let project_id = data.groups[group_index].projects[project_index].id.clone();
     let direct = if args.wsl {
-        Some((LaunchEnv::Wsl, String::new()))
+        Some(terminal_option(LaunchEnv::Wsl))
     } else if args.powershell {
-        Some((LaunchEnv::PowerShell, String::new()))
+        Some(terminal_option(LaunchEnv::PowerShell))
     } else if args.code {
-        Some((LaunchEnv::Ide, first_ide_command(&config)?))
+        Some(first_ide_option(&config)?)
     } else if args.ssh {
-        Some((LaunchEnv::Ssh, String::new()))
+        Some(terminal_option(LaunchEnv::Ssh))
     } else {
         None
     };
-    if let Some((env, command)) = direct {
+    if let Some(option) = direct {
         let project = &data.groups[group_index].projects[project_index];
-        let spawned = launcher::spawn_direct(&data, project, &group_name, env, &command)
-            .map_err(anyhow::Error::msg)?;
-        launcher::wait_spawned(spawned).map_err(anyhow::Error::msg)?;
+        launcher::launch(&data, project, &group_name, &option).map_err(anyhow::Error::msg)?;
         return Ok(());
     }
     let mut config = Config::load();
@@ -43,32 +41,42 @@ pub(crate) fn cmd_direct(selector: &ProjectSelector, env: LaunchEnv) -> Result<(
         select_project(&data, &selector.name, selector.group.as_deref())?;
     let group_name = data.groups[group_index].name.clone();
     let project = &data.groups[group_index].projects[project_index];
-    let spawned =
-        launcher::spawn_direct(&data, project, &group_name, env, "").map_err(anyhow::Error::msg)?;
-    launcher::wait_spawned(spawned).map_err(anyhow::Error::msg)?;
+    let option = terminal_option(env);
+    launcher::launch(&data, project, &group_name, &option).map_err(anyhow::Error::msg)?;
     Ok(())
 }
 
 /// `pcs code` 使用 config.ide 的第一个工具（默认 VS Code），跟随用户配置。
 pub(crate) fn cmd_code(selector: &ProjectSelector, config: &AppConfig) -> Result<()> {
-    let command = first_ide_command(config)?;
+    let option = first_ide_option(config)?;
     let data = Store::load();
     let (group_index, project_index) =
         select_project(&data, &selector.name, selector.group.as_deref())?;
     let group_name = data.groups[group_index].name.clone();
     let project = &data.groups[group_index].projects[project_index];
-    let spawned = launcher::spawn_direct(&data, project, &group_name, LaunchEnv::Ide, &command)
-        .map_err(anyhow::Error::msg)?;
-    launcher::wait_spawned(spawned).map_err(anyhow::Error::msg)?;
+    launcher::launch(&data, project, &group_name, &option).map_err(anyhow::Error::msg)?;
     Ok(())
 }
 
-pub(crate) fn first_ide_command(config: &AppConfig) -> Result<String> {
-    config
-        .ide
-        .first()
-        .map(|tool| tool.command.clone())
-        .ok_or_else(|| anyhow::anyhow!("IDE 工具列表为空，请用 pcs config 添加工具或恢复默认配置"))
+fn terminal_option(env: LaunchEnv) -> LaunchOption {
+    LaunchOption {
+        env,
+        tool_name: "终端".into(),
+        command: String::new(),
+        is_custom: false,
+    }
+}
+
+fn first_ide_option(config: &AppConfig) -> Result<LaunchOption> {
+    let tool = config.ide.first().ok_or_else(|| {
+        anyhow::anyhow!("IDE 工具列表为空，请用 pcs config 添加工具或恢复默认配置")
+    })?;
+    Ok(LaunchOption {
+        env: LaunchEnv::Ide,
+        tool_name: tool.name.clone(),
+        command: tool.command.clone(),
+        is_custom: false,
+    })
 }
 
 pub(crate) fn cmd_path(selector: &ProjectSelector, wsl: bool) -> Result<()> {

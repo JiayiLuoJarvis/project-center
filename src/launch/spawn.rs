@@ -37,6 +37,34 @@ impl LaunchEnv {
         }
     }
 
+    /// 写入 `recent.json` 的稳定串。
+    pub fn as_recent_str(self) -> &'static str {
+        match self {
+            Self::Wsl => "wsl",
+            Self::PowerShell => "powershell",
+            Self::Ide => "ide",
+            Self::Explorer => "explorer",
+            Self::Ssh => "ssh",
+        }
+    }
+
+    /// 解析 `recent.json` 的 `env`。大小写不敏感。对不上则 `None`。
+    pub fn from_recent_str(s: &str) -> Option<Self> {
+        if s.eq_ignore_ascii_case("wsl") {
+            Some(Self::Wsl)
+        } else if s.eq_ignore_ascii_case("powershell") {
+            Some(Self::PowerShell)
+        } else if s.eq_ignore_ascii_case("ide") {
+            Some(Self::Ide)
+        } else if s.eq_ignore_ascii_case("explorer") {
+            Some(Self::Explorer)
+        } else if s.eq_ignore_ascii_case("ssh") {
+            Some(Self::Ssh)
+        } else {
+            None
+        }
+    }
+
     /// 解析项目自定义命令的 env 字符串：wsl / powershell / ide（大小写不敏感），空或非法视为 ide。
     pub fn from_command_env(env: &str) -> LaunchEnv {
         if env.eq_ignore_ascii_case("wsl") {
@@ -493,6 +521,28 @@ mod tests {
         assert_eq!(LaunchEnv::Wsl.short_label(), "wsl");
         assert_eq!(LaunchEnv::PowerShell.short_label(), "ps");
         assert_eq!(LaunchEnv::Ide.short_label(), "ide");
+    }
+
+    #[test]
+    fn env_recent_str_round_trip() {
+        assert_eq!(LaunchEnv::Wsl.as_recent_str(), "wsl");
+        assert_eq!(LaunchEnv::PowerShell.as_recent_str(), "powershell");
+        assert_eq!(LaunchEnv::Ide.as_recent_str(), "ide");
+        assert_eq!(LaunchEnv::Explorer.as_recent_str(), "explorer");
+        assert_eq!(LaunchEnv::Ssh.as_recent_str(), "ssh");
+        assert_eq!(LaunchEnv::from_recent_str("WSL"), Some(LaunchEnv::Wsl));
+        assert_eq!(
+            LaunchEnv::from_recent_str("PowerShell"),
+            Some(LaunchEnv::PowerShell)
+        );
+        assert_eq!(LaunchEnv::from_recent_str("IDE"), Some(LaunchEnv::Ide));
+        assert_eq!(
+            LaunchEnv::from_recent_str("explorer"),
+            Some(LaunchEnv::Explorer)
+        );
+        assert_eq!(LaunchEnv::from_recent_str("ssh"), Some(LaunchEnv::Ssh));
+        assert_eq!(LaunchEnv::from_recent_str("ps"), None);
+        assert_eq!(LaunchEnv::from_recent_str("mystery"), None);
     }
 
     #[test]

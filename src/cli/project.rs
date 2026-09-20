@@ -4,7 +4,7 @@ use crate::domain as ops;
 use crate::domain::models::{self, Endpoint, Project, ProjectData, rfc3339_now};
 use crate::domain::{ConnectionPatch, KeyChange};
 use crate::launch as launcher;
-use crate::launch::LaunchEnv;
+use crate::launch::{LaunchEnv, LaunchOption};
 use crate::persist as secret;
 use crate::persist::Store;
 
@@ -247,9 +247,19 @@ pub(crate) fn cmd_run(args: RunArgs) -> Result<()> {
         bail!("缺少命令名，或使用 --list 列出项目自定义命令");
     };
     let (env, command) = resolve_run_command(project, name)?;
-    let spawned = launcher::spawn_direct(&data, project, &group_name, env, &command)
-        .map_err(anyhow::Error::msg)?;
-    launcher::wait_spawned(spawned).map_err(anyhow::Error::msg)?;
+    let tool_name = project
+        .commands
+        .iter()
+        .find(|item| item.name.eq_ignore_ascii_case(name))
+        .map(|item| item.name.clone())
+        .unwrap_or_else(|| name.to_string());
+    let option = LaunchOption {
+        env,
+        tool_name,
+        command,
+        is_custom: true,
+    };
+    launcher::launch(&data, project, &group_name, &option).map_err(anyhow::Error::msg)?;
     Ok(())
 }
 

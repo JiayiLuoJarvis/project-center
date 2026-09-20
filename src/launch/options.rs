@@ -1,4 +1,4 @@
-use crate::domain::models::Project;
+use crate::domain::models::{Project, ProjectData};
 use crate::launch::LaunchEnv;
 use crate::persist::AppConfig;
 
@@ -116,6 +116,29 @@ pub fn default_first(
     let mut labels = vec![label];
     labels.extend(items.iter().skip(1).map(|option| option.label()));
     (items, labels)
+}
+
+/// 把一次成功的 `LaunchOption` 记入 `recent.json`。
+pub fn record_recent(project_id: &str, option: &LaunchOption) {
+    crate::persist::record(
+        project_id,
+        option.env.as_recent_str(),
+        &option.tool_name,
+        &option.command,
+    );
+}
+
+/// 产品启动入口：spawn → wait → 成功后记账。测试仍可直接调 `spawn_direct` / `wait_spawned`。
+pub fn launch(
+    data: &ProjectData,
+    project: &Project,
+    group: &str,
+    option: &LaunchOption,
+) -> crate::launch::Result<i32> {
+    let spawned = crate::launch::spawn_direct(data, project, group, option.env, &option.command)?;
+    let code = crate::launch::wait_spawned(spawned)?;
+    record_recent(&project.id, option);
+    Ok(code)
 }
 
 #[cfg(test)]
