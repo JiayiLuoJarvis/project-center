@@ -66,7 +66,6 @@ impl LaunchEnv {
     }
 
     /// 解析项目自定义命令的 env 字符串：wsl / powershell / ide / ssh（大小写不敏感），空或非法视为 ide。
-    /// 与 `domain::command::canonical_env` 共用同一套词表。
     pub fn from_command_env(env: &str) -> LaunchEnv {
         if env.eq_ignore_ascii_case("wsl") {
             Self::Wsl

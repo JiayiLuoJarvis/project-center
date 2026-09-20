@@ -107,7 +107,7 @@ impl Project {
 }
 
 /// 项目自定义命令：项目级覆盖启动工具，命令原样交给 shell。
-/// `env` 取值 `wsl` / `powershell` / `ide`（解析大小写不敏感），空或非法视为 `ide`。
+/// `env` 取值 `wsl` / `powershell` / `ide` / `ssh`（解析大小写不敏感），空或非法视为 `ide`。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectCommand {
     pub name: String,

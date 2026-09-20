@@ -2,7 +2,6 @@ use super::{Error, Result, find_project_by_id};
 use crate::domain::models::{ProjectCommand, ProjectData};
 
 /// env 字符串规范化：wsl / powershell / ide / ssh（大小写不敏感），空或非法视为 ide。
-/// 与 `LaunchEnv::from_command_env` 共用同一套词表，非法值两边都落到 ide。
 fn canonical_env(env: &str) -> &'static str {
     if env.eq_ignore_ascii_case("wsl") {
         "wsl"
@@ -29,7 +28,6 @@ fn validate_command(name: &str, env: &str, command: &str) -> Result<ProjectComma
 }
 
 /// 为项目添加自定义命令；命令名同一项目内唯一（大小写不敏感），env 非法视为 ide。
-/// SSH 项目写入时锁死 `env=ssh`，忽略调用方传入的环境。
 pub fn add_project_command(
     data: &mut ProjectData,
     id: &str,
