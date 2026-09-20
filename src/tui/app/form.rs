@@ -515,7 +515,7 @@ impl App {
         Outcome::Continue
     }
 
-    fn finish_submit(&mut self, result: Result<String, String>) {
+    fn finish_submit(&mut self, result: Result<String, crate::tui::actions::Error>) {
         match result {
             Ok(msg) => {
                 self.back_to_browse();

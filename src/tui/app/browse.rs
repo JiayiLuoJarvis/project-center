@@ -360,7 +360,6 @@ impl App {
                         project_id,
                         edit_index: None,
                         name: String::new(),
-                        current_env: String::new(),
                     },
                 };
             }
@@ -453,7 +452,6 @@ impl App {
                         project_id,
                         edit_index: Some(ci),
                         name: cmd.name.clone(),
-                        current_env: cmd.env.clone(),
                     },
                 };
             }
@@ -473,7 +471,7 @@ impl App {
                 };
                 self.mode = Mode::Confirm {
                     message,
-                    kind: ConfirmKind::DeleteGroup { name, count },
+                    kind: ConfirmKind::DeleteGroup { name },
                 };
             }
             return;
@@ -496,10 +494,7 @@ impl App {
                 }
                 self.mode = Mode::Confirm {
                     message: format!("确认删除连接 `{}`？ y/N", conn.name),
-                    kind: ConfirmKind::DeleteConnection {
-                        id,
-                        name: conn.name.clone(),
-                    },
+                    kind: ConfirmKind::DeleteConnection { id },
                 };
             }
             RightPane::Projects => {
@@ -514,7 +509,6 @@ impl App {
                         kind: ConfirmKind::DeleteProject {
                             group: data.groups[gi].name.clone(),
                             project_id: p.id.clone(),
-                            name: p.name.clone(),
                         },
                     };
                 }
@@ -529,7 +523,6 @@ impl App {
                     message: format!("确认彻底删除 `{}`？此操作不可恢复。 y/N", item.name),
                     kind: ConfirmKind::PurgeTrash {
                         id: item.id.clone(),
-                        name: item.name.clone(),
                     },
                 };
             }
@@ -541,11 +534,7 @@ impl App {
                 let name = env.tools(config)[ti].name.clone();
                 self.mode = Mode::Confirm {
                     message: format!("确认删除工具 `{name}`？ y/N"),
-                    kind: ConfirmKind::DeleteTool {
-                        env,
-                        index: ti,
-                        name,
-                    },
+                    kind: ConfirmKind::DeleteTool { env, index: ti },
                 };
             }
             RightPane::Commands { group, project_id } => {
@@ -563,7 +552,6 @@ impl App {
                         group,
                         project_id,
                         index: ci,
-                        name,
                     },
                 };
             }

@@ -87,7 +87,7 @@ impl App {
                         };
                         self.mode = Mode::Confirm {
                             message,
-                            kind: ConfirmKind::DeleteGroup { name: group, count },
+                            kind: ConfirmKind::DeleteGroup { name: group },
                         };
                     }
                     _ => {}
@@ -129,11 +129,7 @@ impl App {
                     if let Some(project) = actions::find_project_ref(data, &group, &project_id) {
                         self.mode = Mode::Confirm {
                             message: format!("确认删除项目 `{}`？ y/N", project.name),
-                            kind: ConfirmKind::DeleteProject {
-                                group,
-                                project_id,
-                                name: project.name.clone(),
-                            },
+                            kind: ConfirmKind::DeleteProject { group, project_id },
                         };
                     }
                 }
@@ -171,7 +167,7 @@ impl App {
                         .unwrap_or_default();
                     self.mode = Mode::Confirm {
                         message: format!("确认彻底删除 `{name}`？此操作不可恢复。 y/N"),
-                        kind: ConfirmKind::PurgeTrash { id, name },
+                        kind: ConfirmKind::PurgeTrash { id },
                     };
                 }
                 _ => {}
@@ -197,7 +193,7 @@ impl App {
                         .unwrap_or_default();
                     self.mode = Mode::Confirm {
                         message: format!("确认删除工具 `{name}`？ y/N"),
-                        kind: ConfirmKind::DeleteTool { env, index, name },
+                        kind: ConfirmKind::DeleteTool { env, index },
                     };
                 }
                 _ => {}
@@ -225,10 +221,7 @@ impl App {
                     } else if let Some(conn) = data.connection(&id) {
                         self.mode = Mode::Confirm {
                             message: format!("确认删除连接 `{}`？ y/N", conn.name),
-                            kind: ConfirmKind::DeleteConnection {
-                                name: conn.name.clone(),
-                                id,
-                            },
+                            kind: ConfirmKind::DeleteConnection { id },
                         };
                     }
                 }
@@ -257,7 +250,6 @@ impl App {
                                 project_id,
                                 edit_index: Some(index),
                                 name: cmd.name.clone(),
-                                current_env: cmd.env.clone(),
                             },
                         };
                     }
@@ -275,7 +267,6 @@ impl App {
                                 group,
                                 project_id,
                                 index,
-                                name,
                             },
                         };
                     }
@@ -350,7 +341,6 @@ impl App {
                 project_id,
                 edit_index,
                 name,
-                ..
             } => {
                 let env = match selected {
                     1 => "powershell",

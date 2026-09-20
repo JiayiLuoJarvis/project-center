@@ -91,6 +91,15 @@ impl Project {
         !self.path.trim().is_empty() && !is_linux_path(&self.path)
     }
 
+    /// 可用于本机工具的 Windows 路径：已有盘符路径直接返回，
+    /// 否则把 `/mnt/<drive>/...` 换回盘符路径。
+    pub fn windows_path(&self) -> Option<String> {
+        if self.has_windows_path() {
+            return Some(self.path.clone());
+        }
+        linux_path_to_win(&self.path).or_else(|| linux_path_to_win(&self.linux_path()))
+    }
+
     /// 是否设置了默认启动工具。
     pub fn has_default_tool(&self) -> bool {
         !self.default_tool.trim().is_empty()
@@ -547,7 +556,6 @@ pub fn is_wsl_path(p: &str) -> bool {
 }
 
 /// `/mnt/e/dev/foo` -> `E:\dev\foo`；不匹配返回 None。
-#[allow(dead_code)]
 pub fn linux_path_to_win(p: &str) -> Option<String> {
     let t = normalize(p);
     let rest = t.strip_prefix("/mnt/")?;
@@ -639,6 +647,21 @@ mod tests {
         assert_eq!(linux_path_to_win("/home/user/foo"), None);
         assert_eq!(linux_path_to_win(r"E:\dev\foo"), None);
         assert_eq!(linux_path_to_win(""), None);
+    }
+
+    #[test]
+    fn windows_path_uses_drive_or_mnt() {
+        assert_eq!(
+            Project::new("a", r"C:\Work", "").windows_path().as_deref(),
+            Some(r"C:\Work")
+        );
+        assert_eq!(
+            Project::new("a", "", "/mnt/e/dev/foo")
+                .windows_path()
+                .as_deref(),
+            Some(r"E:\dev\foo")
+        );
+        assert!(Project::new("a", "", "/home/me").windows_path().is_none());
     }
 
     #[test]

@@ -20,4 +20,10 @@ impl From<String> for Error {
     }
 }
 
+impl From<crate::persist::Error> for Error {
+    fn from(value: crate::persist::Error) -> Self {
+        Self::Message(value.to_string())
+    }
+}
+
 pub type Result<T> = std::result::Result<T, Error>;

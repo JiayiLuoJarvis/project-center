@@ -10,20 +10,43 @@ use crate::persist::{
     AppConfig, Config, ConfigEnv, add_tool, edit_tool, remove_tool, reset_config,
 };
 
-pub fn save_data(data: &ProjectData) -> Result<(), String> {
-    if Store::save(data) {
-        Ok(())
-    } else {
-        Err("保存数据失败".into())
+/// TUI 动作错误：保留领域 / 持久化类型，校验失败仍用中文说明。
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error(transparent)]
+    Domain(#[from] crate::domain::Error),
+    #[error(transparent)]
+    Persist(#[from] crate::persist::Error),
+    #[error("{0}")]
+    Message(String),
+}
+
+impl From<String> for Error {
+    fn from(value: String) -> Self {
+        Self::Message(value)
     }
 }
 
-pub fn save_config(config: &AppConfig) -> Result<(), String> {
-    if Config::save(config) {
-        Ok(())
-    } else {
-        Err("无法写入 config.json".into())
+impl From<&str> for Error {
+    fn from(value: &str) -> Self {
+        Self::Message(value.to_string())
     }
+}
+
+impl From<Error> for String {
+    fn from(value: Error) -> Self {
+        value.to_string()
+    }
+}
+
+pub fn save_data(data: &ProjectData) -> Result<(), Error> {
+    Store::save(data)?;
+    Ok(())
+}
+
+pub fn save_config(config: &AppConfig) -> Result<(), Error> {
+    Config::save(config)?;
+    Ok(())
 }
 
 pub fn trash_label(item: &crate::domain::models::DeletedItem) -> String {
@@ -52,8 +75,8 @@ pub fn launch_labels(project: &Project, config: &AppConfig) -> (Vec<LaunchOption
     default_first(build_launch_options(project, config), project)
 }
 
-pub fn add_group(data: &mut ProjectData, name: &str, alias: &str) -> Result<String, String> {
-    ops::add_group_with_alias(data, name, alias).map_err(|e| e.to_string())?;
+pub fn add_group(data: &mut ProjectData, name: &str, alias: &str) -> Result<String, Error> {
+    ops::add_group_with_alias(data, name, alias)?;
     save_data(data)?;
     Ok(format!("分组已添加: {}", name.trim()))
 }
@@ -63,14 +86,14 @@ pub fn rename_group(
     old: &str,
     new: &str,
     alias: &str,
-) -> Result<String, String> {
-    ops::rename_group_with_alias(data, old, new, Some(alias)).map_err(|e| e.to_string())?;
+) -> Result<String, Error> {
+    ops::rename_group_with_alias(data, old, new, Some(alias))?;
     save_data(data)?;
     Ok(format!("分组已重命名: {}", new.trim()))
 }
 
-pub fn remove_group(data: &mut ProjectData, name: &str) -> Result<String, String> {
-    ops::remove_group(data, name, false).map_err(|e| e.to_string())?;
+pub fn remove_group(data: &mut ProjectData, name: &str) -> Result<String, Error> {
+    ops::remove_group(data, name, false)?;
     save_data(data)?;
     Ok(format!("分组已删除: {name}（已移入回收站）"))
 }
@@ -82,7 +105,7 @@ pub fn add_project_paths(
     alias: &str,
     path: &str,
     wsl_path: &str,
-) -> Result<String, String> {
+) -> Result<String, Error> {
     let name = name.trim();
     if name.is_empty() {
         return Err("项目名不能为空".into());
@@ -108,7 +131,7 @@ pub fn add_project_paths(
         wsl
     };
     let project = Project::new(name, path, wsl).with_alias(alias.trim());
-    ops::add_project(data, group, project).map_err(|e| e.to_string())?;
+    ops::add_project(data, group, project)?;
     save_data(data)?;
     Ok(format!("项目已添加: {name}"))
 }
@@ -121,7 +144,7 @@ pub fn edit_project(
     alias: &str,
     path: &str,
     wsl_path: &str,
-) -> Result<String, String> {
+) -> Result<String, Error> {
     let new_name = new_name.trim();
     let path = path.trim();
     let wsl_path = wsl_path.trim();
@@ -133,8 +156,7 @@ pub fn edit_project(
         Some(alias.trim()),
         Some(path),
         Some(wsl_path),
-    )
-    .map_err(|e| e.to_string())?;
+    )?;
     save_data(data)?;
     Ok(format!("项目已更新: {new_name}"))
 }
@@ -160,7 +182,7 @@ pub fn save_project(
     group: &str,
     existing_id: Option<&str>,
     input: ProjectInput,
-) -> Result<String, String> {
+) -> Result<String, Error> {
     let name = input.name.trim();
     if name.is_empty() {
         return Err("项目名不能为空".into());
@@ -183,12 +205,9 @@ pub fn save_project(
                     Some(input.alias.trim()),
                     None,
                     None,
-                )
-                .map_err(|e| e.to_string())?;
-                let (gi, pi) =
-                    ops::find_project_by_id(data, id, Some(group)).map_err(|e| e.to_string())?;
-                data.attach_connection(gi, pi, cid, &input.remote_path)
-                    .map_err(|e| e.to_string())?;
+                )?;
+                let (gi, pi) = ops::find_project_by_id(data, id, Some(group))?;
+                data.attach_connection(gi, pi, cid, &input.remote_path)?;
                 save_data(data)?;
                 Ok(format!("项目已更新: {name}"))
             }
@@ -196,7 +215,7 @@ pub fn save_project(
                 let project = Project::new(name, input.remote_path.trim(), "")
                     .with_connection(cid)
                     .with_alias(input.alias.trim());
-                ops::add_project(data, group, project).map_err(|e| e.to_string())?;
+                ops::add_project(data, group, project)?;
                 save_data(data)?;
                 Ok(format!("项目已添加: {name}"))
             }
@@ -237,7 +256,7 @@ fn connection_secrets_patch(
     connection_id: &str,
     secrets: &SecretInput,
     clear_key: bool,
-) -> Result<ConnectionPatch, String> {
+) -> Result<ConnectionPatch, Error> {
     let old_source = data
         .connection(connection_id)
         .map(|c| c.ssh_key_path.trim().to_string())
@@ -278,18 +297,15 @@ pub fn add_connection(
     data: &mut ProjectData,
     draft: ConnectionDraft,
     secrets: SecretInput,
-) -> Result<String, String> {
+) -> Result<String, Error> {
     let now = rfc3339_now();
-    let id = data
-        .add_connection(draft, &now)
-        .map_err(|e| e.to_string())?;
+    let id = data.add_connection(draft, &now)?;
     let patch = connection_secrets_patch(data, &id, &secrets, false)?;
     if !matches!(patch.key, KeyChange::Keep)
         || patch.password_enc.is_some()
         || patch.key_pass_enc.is_some()
     {
-        data.edit_connection(&id, patch, &now)
-            .map_err(|e| e.to_string())?;
+        data.edit_connection(&id, patch, &now)?;
     }
     save_data(data)?;
     Ok(id)
@@ -301,21 +317,20 @@ pub fn edit_connection(
     draft: ConnectionDraft,
     secrets: SecretInput,
     clear_key: bool,
-) -> Result<String, String> {
+) -> Result<String, Error> {
     let now = rfc3339_now();
     let mut patch = connection_secrets_patch(data, id, &secrets, clear_key)?;
     patch.name = Some(draft.name);
     patch.user = Some(draft.user);
     patch.host = Some(draft.host);
     patch.port = Some(draft.port);
-    data.edit_connection(id, patch, &now)
-        .map_err(|e| e.to_string())?;
+    data.edit_connection(id, patch, &now)?;
     save_data(data)?;
     Ok("连接已更新".into())
 }
 
-pub fn remove_connection(data: &mut ProjectData, id: &str) -> Result<String, String> {
-    let removed = data.remove_connection(id).map_err(|e| e.to_string())?;
+pub fn remove_connection(data: &mut ProjectData, id: &str) -> Result<String, Error> {
+    let removed = data.remove_connection(id)?;
     ops::drop_key_file(data, &removed.ssh_key_file);
     save_data(data)?;
     Ok(format!("连接已删除: {}", removed.name))
@@ -329,9 +344,8 @@ pub fn remove_project(
     data: &mut ProjectData,
     project_id: &str,
     group: &str,
-) -> Result<String, String> {
-    let removed = ops::remove_project_by_id(data, project_id, Some(group), false)
-        .map_err(|e| e.to_string())?;
+) -> Result<String, Error> {
+    let removed = ops::remove_project_by_id(data, project_id, Some(group), false)?;
     save_data(data)?;
     Ok(format!("已删除项目: {}（已移入回收站）", removed.name))
 }
@@ -341,9 +355,8 @@ pub fn move_project(
     project_id: &str,
     source_group: &str,
     dest: &str,
-) -> Result<String, String> {
-    ops::move_project_by_id(data, project_id, Some(source_group), dest)
-        .map_err(|e| e.to_string())?;
+) -> Result<String, Error> {
+    ops::move_project_by_id(data, project_id, Some(source_group), dest)?;
     save_data(data)?;
     Ok(format!("项目已移动到: {dest}"))
 }
@@ -353,8 +366,8 @@ pub fn set_default_tool(
     project_id: &str,
     group: &str,
     tool: Option<&str>,
-) -> Result<String, String> {
-    ops::set_default_tool(data, project_id, Some(group), tool).map_err(|e| e.to_string())?;
+) -> Result<String, Error> {
+    ops::set_default_tool(data, project_id, Some(group), tool)?;
     save_data(data)?;
     Ok("默认启动方式已更新。".into())
 }
@@ -366,9 +379,8 @@ pub fn add_command(
     name: &str,
     env: &str,
     command: &str,
-) -> Result<String, String> {
-    ops::add_project_command(data, project_id, Some(group), name, env, command)
-        .map_err(|e| e.to_string())?;
+) -> Result<String, Error> {
+    ops::add_project_command(data, project_id, Some(group), name, env, command)?;
     save_data(data)?;
     Ok(format!("命令已添加: {}", name.trim()))
 }
@@ -381,9 +393,8 @@ pub fn edit_command(
     name: &str,
     env: &str,
     command: &str,
-) -> Result<String, String> {
-    ops::edit_project_command(data, project_id, Some(group), index, name, env, command)
-        .map_err(|e| e.to_string())?;
+) -> Result<String, Error> {
+    ops::edit_project_command(data, project_id, Some(group), index, name, env, command)?;
     save_data(data)?;
     Ok(format!("命令已更新: {}", name.trim()))
 }
@@ -393,26 +404,25 @@ pub fn remove_command(
     project_id: &str,
     group: &str,
     index: usize,
-) -> Result<String, String> {
-    let removed = ops::remove_project_command(data, project_id, Some(group), index)
-        .map_err(|e| e.to_string())?;
+) -> Result<String, Error> {
+    let removed = ops::remove_project_command(data, project_id, Some(group), index)?;
     save_data(data)?;
     Ok(format!("命令已删除: {}", removed.name))
 }
 
-pub fn restore_trash(data: &mut ProjectData, id: &str) -> Result<String, String> {
-    let msg = ops::restore_item(data, id).map_err(|e| e.to_string())?;
+pub fn restore_trash(data: &mut ProjectData, id: &str) -> Result<String, Error> {
+    let msg = ops::restore_item(data, id)?;
     save_data(data)?;
     Ok(msg)
 }
 
-pub fn purge_trash_item(data: &mut ProjectData, id: &str) -> Result<String, String> {
-    let item = ops::delete_trash_item(data, id).map_err(|e| e.to_string())?;
+pub fn purge_trash_item(data: &mut ProjectData, id: &str) -> Result<String, Error> {
+    let item = ops::delete_trash_item(data, id)?;
     save_data(data)?;
     Ok(format!("已彻底删除: {}", item.name))
 }
 
-pub fn empty_trash(data: &mut ProjectData) -> Result<String, String> {
+pub fn empty_trash(data: &mut ProjectData) -> Result<String, Error> {
     ops::empty_trash(data);
     save_data(data)?;
     Ok("回收站已清空。".into())
@@ -423,7 +433,7 @@ pub fn add_config_tool(
     env: ConfigEnv,
     name: &str,
     command: &str,
-) -> Result<String, String> {
+) -> Result<String, Error> {
     add_tool(config, env, name, command)?;
     save_config(config)?;
     Ok(format!("工具已添加: {}", name.trim()))
@@ -435,7 +445,7 @@ pub fn edit_config_tool(
     index: usize,
     name: &str,
     command: &str,
-) -> Result<String, String> {
+) -> Result<String, Error> {
     edit_tool(config, env, index, name, command)?;
     save_config(config)?;
     Ok(format!("工具已更新: {}", name.trim()))
@@ -445,7 +455,7 @@ pub fn remove_config_tool(
     config: &mut AppConfig,
     env: ConfigEnv,
     index: usize,
-) -> Result<String, String> {
+) -> Result<String, Error> {
     let name = env
         .tools(config)
         .get(index)
@@ -456,7 +466,7 @@ pub fn remove_config_tool(
     Ok(format!("工具已删除: {name}"))
 }
 
-pub fn reset_app_config(config: &mut AppConfig) -> Result<String, String> {
+pub fn reset_app_config(config: &mut AppConfig) -> Result<String, Error> {
     reset_config(config);
     save_config(config)?;
     Ok("配置已恢复默认。".into())

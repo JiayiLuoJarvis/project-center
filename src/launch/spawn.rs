@@ -3,8 +3,6 @@ use std::process::Command;
 
 use zeroize::Zeroize;
 
-use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, SetConsoleTitleW};
-
 use crate::domain::models::{Connection, Project, ProjectData};
 use crate::persist as secret;
 
@@ -55,12 +53,14 @@ impl LaunchEnv {
 /// 避免信号误杀本进程后由外层 shell 抢回控制台输入，导致被启动的工具收不到按键。
 /// 返回子进程退出码；被信号终止（`code()` 为 None）映射为 -1。
 fn wait_console_child(mut child: std::process::Child) -> std::io::Result<i32> {
+    #[cfg(windows)]
     unsafe {
-        SetConsoleCtrlHandler(None, 1);
+        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 1);
     }
     let result = child.wait();
+    #[cfg(windows)]
     unsafe {
-        SetConsoleCtrlHandler(None, 0);
+        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(None, 0);
     }
     result.map(|status| status.code().unwrap_or(-1))
 }
@@ -70,10 +70,17 @@ fn console_title(project: &Project, group_name: &str) -> String {
 }
 
 fn apply_console_title(title: &str) {
-    let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
-    // 标题设置失败不应阻止项目启动。
-    unsafe {
-        SetConsoleTitleW(title.as_ptr());
+    #[cfg(windows)]
+    {
+        let title: Vec<u16> = title.encode_utf16().chain(std::iter::once(0)).collect();
+        // 标题设置失败不应阻止项目启动。
+        unsafe {
+            windows_sys::Win32::System::Console::SetConsoleTitleW(title.as_ptr());
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = title;
     }
 }
 
@@ -107,28 +114,28 @@ fn powershell_script(win_path: &str, command: &str) -> String {
     script
 }
 
-fn spawn_wsl(p: &Project, group_name: &str, command: &str) -> Result<std::process::Child, String> {
+fn spawn_wsl(p: &Project, group_name: &str, command: &str) -> super::Result<std::process::Child> {
     set_console_title(p, group_name);
     Command::new("wsl.exe")
         .args(wsl_args(&p.linux_path(), command))
         .spawn()
-        .map_err(|e| format!("WSL 启动失败: {e}"))
+        .map_err(|e| super::Error::from(format!("WSL 启动失败: {e}")))
 }
 
 fn spawn_powershell(
     p: &Project,
     group_name: &str,
     command: &str,
-) -> Result<std::process::Child, String> {
+) -> super::Result<std::process::Child> {
     set_console_title(p, group_name);
     let script = powershell_script(&p.path, command);
     Command::new("powershell.exe")
         .args(["-NoExit", "-Command", script.as_str()])
         .spawn()
-        .map_err(|e| format!("PowerShell 启动失败: {e}"))
+        .map_err(|e| super::Error::from(format!("PowerShell 启动失败: {e}")))
 }
 
-fn spawn_ide(p: &Project, command: &str) -> Result<std::process::Child, String> {
+fn spawn_ide(p: &Project, command: &str) -> super::Result<std::process::Child> {
     let mut args = vec!["/c".to_string(), command.to_string(), p.path.clone()];
     args.retain(|arg| !arg.trim().is_empty());
     Command::new("cmd")
@@ -136,16 +143,16 @@ fn spawn_ide(p: &Project, command: &str) -> Result<std::process::Child, String> 
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map_err(|e| format!("IDE 启动失败: {e}"))
+        .map_err(|e| super::Error::from(format!("IDE 启动失败: {e}")))
 }
 
-fn spawn_explorer(p: &Project) -> Result<std::process::Child, String> {
+fn spawn_explorer(p: &Project) -> super::Result<std::process::Child> {
     Command::new("explorer.exe")
         .arg(&p.path)
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .map_err(|e| format!("资源管理器启动失败: {e}"))
+        .map_err(|e| super::Error::from(format!("资源管理器启动失败: {e}")))
 }
 
 /// 构造 ssh 参数：从 Connection 取 user/host/port；项目 path 作为远程 cwd。
@@ -173,7 +180,7 @@ fn ssh_args(connection: &Connection, key_path: Option<&str>, remote_path: &str) 
 }
 
 /// 随机 token 的 hex 编码（askpass 注入校验用）。
-fn random_token_hex() -> Result<String, String> {
+fn random_token_hex() -> super::Result<String> {
     let mut bytes = [0u8; 32];
     secret::fill_random(&mut bytes)?;
     Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
@@ -182,14 +189,16 @@ fn random_token_hex() -> Result<String, String> {
 /// 把 askpass token 写入数据根 `keys_tmp\`，供 `__askpass` 与 env 中的
 /// token 比对（设计 §3.5：token 缺失/不匹配 → 输出空，防直调拿明文）。
 /// ssh 退出后由 `wait_spawned` 覆写删除；进程崩溃残留由启动维护兜底。
-fn write_askpass_token_file_in(dir: &std::path::Path, token: &str) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(dir).map_err(|e| format!("创建 keys_tmp 失败: {e}"))?;
+fn write_askpass_token_file_in(dir: &std::path::Path, token: &str) -> super::Result<PathBuf> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| super::Error::from(format!("创建 keys_tmp 失败: {e}")))?;
     let path = dir.join(format!("askpass-{}.token", uuid::Uuid::new_v4()));
-    std::fs::write(&path, token).map_err(|e| format!("写入 token 校验文件失败: {e}"))?;
+    secret::write_private_file(&path, token.as_bytes())
+        .map_err(|e| super::Error::from(format!("写入 token 校验文件失败: {e}")))?;
     Ok(path)
 }
 
-fn write_askpass_token_file(token: &str) -> Result<PathBuf, String> {
+fn write_askpass_token_file(token: &str) -> super::Result<PathBuf> {
     write_askpass_token_file_in(&secret::data_root().join("keys_tmp"), token)
 }
 
@@ -296,7 +305,7 @@ pub fn spawn_ssh(
                     eprintln!("警告：无法创建密钥临时目录（{e}），本次不带密钥启动。");
                 } else {
                     let path = dir.join(format!("{}.key", uuid::Uuid::new_v4()));
-                    match std::fs::write(&path, plain.as_bytes()) {
+                    match secret::write_private_file(&path, plain.as_bytes()) {
                         Ok(()) => {
                             key_arg = Some(path.to_string_lossy().into_owned());
                             temp_key = Some(path);
@@ -440,7 +449,6 @@ pub fn spawn_direct(
         }),
         LaunchEnv::Ssh => unreachable!("已在上方处理"),
     }
-    .map_err(super::Error::from)
 }
 
 /// 等待子进程退出（阻塞、抑制 Ctrl+C），随后清理 SSH 临时密钥与
@@ -564,10 +572,7 @@ mod tests {
 
     #[test]
     fn wait_spawned_returns_exit_code() {
-        let child = std::process::Command::new("cmd")
-            .args(["/c", "exit 7"])
-            .spawn()
-            .unwrap();
+        let child = exit_child(7);
         let code = wait_spawned(SpawnedDirect {
             child: Some(child),
             temp_key_path: None,
@@ -576,10 +581,7 @@ mod tests {
         .unwrap();
         assert_eq!(code, 7);
 
-        let child = std::process::Command::new("cmd")
-            .args(["/c", "exit 0"])
-            .spawn()
-            .unwrap();
+        let child = exit_child(0);
         let code = wait_spawned(SpawnedDirect {
             child: Some(child),
             temp_key_path: None,
@@ -587,6 +589,23 @@ mod tests {
         })
         .unwrap();
         assert_eq!(code, 0);
+    }
+
+    fn exit_child(code: i32) -> std::process::Child {
+        #[cfg(windows)]
+        {
+            std::process::Command::new("cmd")
+                .args(["/c", &format!("exit {code}")])
+                .spawn()
+                .unwrap()
+        }
+        #[cfg(not(windows))]
+        {
+            std::process::Command::new("sh")
+                .args(["-c", &format!("exit {code}")])
+                .spawn()
+                .unwrap()
+        }
     }
 
     #[test]
@@ -625,12 +644,16 @@ mod tests {
         // 密文损坏 -> 不允许注入（force 下空输出会导致认证必败）
         c.ssh_password_enc = "broken-b64!!".into();
         assert!(!askpass_env_ok(&c));
-        // 合法 DPAPI 密文 -> 允许
-        c.ssh_password_enc = secret::protect("pw").unwrap();
-        assert!(askpass_env_ok(&c));
-        // 口令密文损坏 -> 阻断
         c.ssh_key_pass_enc = "!!".into();
         assert!(!askpass_env_ok(&c));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn askpass_env_ok_accepts_dpapi_ciphertext() {
+        let mut c = conn("abc", "h", 22);
+        c.ssh_password_enc = secret::protect("pw").unwrap();
+        assert!(askpass_env_ok(&c));
     }
 
     #[test]
@@ -638,10 +661,10 @@ mod tests {
         let mut c = conn("abc", "h", 22);
         // 无任何秘密：不注入（force 会劫持交互密码提示）
         assert!(!c.has_saved_secrets());
-        c.ssh_password_enc = secret::protect("pw").unwrap();
+        c.ssh_password_enc = "enc".into();
         assert!(c.has_saved_secrets());
         let mut c2 = conn("abc", "h", 22);
-        c2.ssh_key_pass_enc = secret::protect("kp").unwrap();
+        c2.ssh_key_pass_enc = "kp".into();
         assert!(c2.has_saved_secrets());
         let mut c3 = conn("abc", "h", 22);
         c3.ssh_password_enc = "  ".into();
@@ -688,6 +711,7 @@ mod tests {
         ));
     }
 
+    #[cfg(windows)]
     #[test]
     fn random_token_hex_is_64_chars() {
         let t = random_token_hex().unwrap();
@@ -699,7 +723,7 @@ mod tests {
     #[test]
     fn askpass_token_file_round_trip() {
         let dir = std::env::temp_dir().join(format!("pcs_tok_{}", uuid::Uuid::new_v4()));
-        let token = random_token_hex().unwrap();
+        let token = "a".repeat(64);
         let path = write_askpass_token_file_in(&dir, &token).unwrap();
         assert!(path.parent().unwrap() == dir);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), token);

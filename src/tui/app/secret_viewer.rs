@@ -136,7 +136,7 @@ impl App {
                             pin_input,
                             attempts,
                             revealed: None,
-                            error: Some(e),
+                            error: Some(e.to_string()),
                         };
                     }
                 }

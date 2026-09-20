@@ -10,8 +10,8 @@ use super::common::{read_hidden_line, save};
 /// 保存 PIN 记录；失败仅警告。
 pub(crate) fn save_pin(config: &mut AppConfig, record: Option<secret::PinRecord>) {
     config.pin = record;
-    if !Config::save(config) {
-        eprintln!("警告：无法保存 config.json，PIN 状态可能未持久化。");
+    if let Err(e) = Config::save(config) {
+        eprintln!("警告：{e}，PIN 状态可能未持久化。");
     }
 }
 

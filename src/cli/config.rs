@@ -20,8 +20,8 @@ pub(crate) fn parse_config_env(name: &str) -> Result<ConfigEnv> {
 
 /// 写盘失败仅警告（延续「仅警告」哲学），不中断操作。
 pub(crate) fn save_config(config: &AppConfig) {
-    if !Config::save(config) {
-        eprintln!("警告：无法写入 config.json，本次修改未持久化。");
+    if let Err(e) = Config::save(config) {
+        eprintln!("警告：{e}，本次修改未持久化。");
     }
 }
 

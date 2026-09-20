@@ -61,8 +61,6 @@ pub enum ListKind {
         project_id: String,
         edit_index: Option<usize>,
         name: String,
-        #[allow(dead_code)]
-        current_env: String,
     },
     MoveTarget {
         group: String,
@@ -108,36 +106,24 @@ pub enum ConfirmKind {
     DeleteProject {
         group: String,
         project_id: String,
-        #[allow(dead_code)]
-        name: String,
     },
     DeleteGroup {
         name: String,
-        #[allow(dead_code)]
-        count: usize,
     },
     DeleteCommand {
         group: String,
         project_id: String,
         index: usize,
-        #[allow(dead_code)]
-        name: String,
     },
     DeleteTool {
         env: ConfigEnv,
         index: usize,
-        #[allow(dead_code)]
-        name: String,
     },
     DeleteConnection {
         id: String,
-        #[allow(dead_code)]
-        name: String,
     },
     PurgeTrash {
         id: String,
-        #[allow(dead_code)]
-        name: String,
     },
     EmptyTrash,
     ResetConfig,

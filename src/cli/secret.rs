@@ -110,9 +110,23 @@ pub(crate) fn askpass_token_ok(token: &str, token_file: &str) -> bool {
         return false;
     }
     match std::fs::read_to_string(path) {
-        Ok(expected) => expected.trim().eq_ignore_ascii_case(token),
+        Ok(expected) => ct_eq_ignore_ascii_case(expected.trim(), token),
         Err(_) => false,
     }
+}
+
+/// 长度不同直接拒绝；等长时忽略大小写做常数时间比较。
+fn ct_eq_ignore_ascii_case(left: &str, right: &str) -> bool {
+    let left = left.as_bytes();
+    let right = right.as_bytes();
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (a, b) in left.iter().zip(right.iter()) {
+        diff |= a.to_ascii_lowercase() ^ b.to_ascii_lowercase();
+    }
+    diff == 0
 }
 
 /// SSH_ASKPASS 回调：校验 token -> 按 prompt 分派 -> 解密 -> stdout。

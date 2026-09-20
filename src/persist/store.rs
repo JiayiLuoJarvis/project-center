@@ -82,7 +82,7 @@ impl Store {
         Self::load_from_inner(&Self::file_path(), false).0
     }
 
-    pub fn save(data: &ProjectData) -> bool {
+    pub fn save(data: &ProjectData) -> Result<(), super::Error> {
         Self::save_to(data, &Self::file_path())
     }
 
@@ -129,26 +129,25 @@ impl Store {
 
     /// 原子写：写 `.json.tmp` -> 删除旧文件 -> rename。
     /// 写入前把旧文件轮转为带时间戳的备份（仅当旧文件存在且非空）。
-    pub fn save_to(data: &ProjectData, p: &Path) -> bool {
+    pub fn save_to(data: &ProjectData, p: &Path) -> Result<(), super::Error> {
         let Some(parent) = p.parent() else {
-            return false;
+            return Err(super::Error::SaveFailed {
+                source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "路径没有父目录"),
+            });
         };
-        if std::fs::create_dir_all(parent).is_err() {
-            return false;
-        }
+        std::fs::create_dir_all(parent).map_err(|source| super::Error::SaveFailed { source })?;
         // 备份失败仅警告，不中断保存（延续「仅警告」哲学）。
         if !backup_to(p) {
             eprintln!("警告：无法备份旧数据文件，已跳过备份。");
         }
-        let Ok(json) = serde_json::to_string_pretty(data) else {
-            return false;
-        };
+        let json = serde_json::to_string_pretty(data).map_err(|e| super::Error::SaveFailed {
+            source: super::error::io_invalid(e.to_string()),
+        })?;
         let tmp = p.with_extension("json.tmp");
-        if std::fs::write(&tmp, json).is_err() {
-            return false;
-        }
+        std::fs::write(&tmp, json).map_err(|source| super::Error::SaveFailed { source })?;
         let _ = std::fs::remove_file(p);
-        std::fs::rename(&tmp, p).is_ok()
+        std::fs::rename(&tmp, p).map_err(|source| super::Error::SaveFailed { source })?;
+        Ok(())
     }
 }
 
@@ -218,8 +217,12 @@ fn apply_key_renames(root: Option<&Path>, parsed: &mut ParsedProjects) {
 }
 
 fn rename_key_file(root: &Path, from: &str, to: &str) -> bool {
-    let from_path = root.join(from);
-    let to_path = root.join(to);
+    let Ok(from_path) = super::key_file_path_in(root, from) else {
+        return false;
+    };
+    let Ok(to_path) = super::key_file_path_in(root, to) else {
+        return false;
+    };
     if let Some(parent) = to_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
@@ -475,7 +478,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(Store::save_to(&data, &path));
+        assert!(Store::save_to(&data, &path).is_ok());
         let loaded = Store::load_from(&path);
         assert_eq!(loaded, data);
         let _ = std::fs::remove_dir_all(&dir);
@@ -611,10 +614,10 @@ mod tests {
             ..Default::default()
         };
         // 首次保存：文件不存在，不产生备份
-        assert!(Store::save_to(&data, &path));
+        assert!(Store::save_to(&data, &path).is_ok());
         assert!(backup_names(&dir.join("backups")).is_empty());
         // 再次保存：旧文件轮转为备份
-        assert!(Store::save_to(&data, &path));
+        assert!(Store::save_to(&data, &path).is_ok());
         let names = backup_names(&dir.join("backups"));
         assert_eq!(names.len(), 1);
         assert!(names[0].starts_with(BACKUP_PREFIX));
@@ -631,7 +634,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&path, "").unwrap();
         let data = ProjectData::default();
-        assert!(Store::save_to(&data, &path));
+        assert!(Store::save_to(&data, &path).is_ok());
         assert!(backup_names(&dir.join("backups")).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -678,7 +681,7 @@ mod tests {
             )
             .unwrap();
         }
-        assert!(Store::save_to(&data, &path));
+        assert!(Store::save_to(&data, &path).is_ok());
         let names = backup_names(&backups);
         assert_eq!(names.len(), MAX_BACKUPS);
         assert!(!names[0].starts_with("20200101"));
@@ -714,7 +717,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(Store::save_to(&first, &path));
+        assert!(Store::save_to(&first, &path).is_ok());
         // 把第一份备份改名到旧时间，确保第二次保存的备份名更新
         let first_backup = backup_names(&dir.join("backups"))[0].clone();
         std::fs::rename(
@@ -731,7 +734,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(Store::save_to(&second, &path));
+        assert!(Store::save_to(&second, &path).is_ok());
         // 主文件损坏
         std::fs::write(&path, "{ corrupted !!!").unwrap();
         // 恢复取最新备份：最新备份是第二次保存前的快照（First），
@@ -762,7 +765,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(Store::save_to(&first, &path));
+        assert!(Store::save_to(&first, &path).is_ok());
         // 第二次保存产生更新备份；两份备份都存在
         let second = ProjectData {
             groups: vec![Group {
@@ -772,7 +775,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        assert!(Store::save_to(&second, &path));
+        assert!(Store::save_to(&second, &path).is_ok());
         let backups = dir.join("backups");
         let mut names = backup_names(&backups);
         assert_eq!(names.len(), 2);
@@ -811,8 +814,8 @@ mod tests {
             ..Default::default()
         };
         // 同一秒内的两次保存各自产生独立备份，互不覆盖
-        assert!(Store::save_to(&data, &path));
-        assert!(Store::save_to(&data, &path));
+        assert!(Store::save_to(&data, &path).is_ok());
+        assert!(Store::save_to(&data, &path).is_ok());
         assert_eq!(backup_names(&dir.join("backups")).len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }

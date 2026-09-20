@@ -75,8 +75,8 @@ pub(crate) fn cmd_path(selector: &ProjectSelector, wsl: bool) -> Result<()> {
     let (project, _) = find_selected(selector)?;
     if wsl {
         println!("{}", project.linux_path());
-    } else if project.has_windows_path() {
-        println!("{}", project.path);
+    } else if let Some(path) = project.windows_path() {
+        println!("{path}");
     } else {
         bail!("项目 `{}` 没有 Windows 路径", project.name);
     }

@@ -63,15 +63,6 @@ pub enum ConfigEnv {
 }
 
 impl ConfigEnv {
-    #[allow(dead_code)]
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::Wsl => "wsl",
-            Self::PowerShell => "powershell",
-            Self::Ide => "ide",
-        }
-    }
-
     pub fn label(self) -> &'static str {
         match self {
             Self::Wsl => "WSL",
@@ -157,26 +148,25 @@ impl Config {
         parse_config(&value)
     }
 
-    pub fn save(config: &AppConfig) -> bool {
+    pub fn save(config: &AppConfig) -> Result<(), super::Error> {
         Self::save_to_path(&Self::config_file(), config)
     }
 
     /// 原子写：写旁路 `.tmp` -> 删除旧文件 -> rename。
     #[cfg(test)]
-    pub(crate) fn save_to_dir(dir: &Path, config: &AppConfig) -> bool {
+    pub(crate) fn save_to_dir(dir: &Path, config: &AppConfig) -> Result<(), super::Error> {
         Self::save_to_path(&dir.join("config.json"), config)
     }
 
-    fn save_to_path(path: &Path, config: &AppConfig) -> bool {
-        let Ok(json) = serde_json::to_string_pretty(config) else {
-            return false;
-        };
+    fn save_to_path(path: &Path, config: &AppConfig) -> Result<(), super::Error> {
+        let json = serde_json::to_string_pretty(config).map_err(|e| super::Error::ConfigWrite {
+            source: super::error::io_invalid(e.to_string()),
+        })?;
         let tmp = path_with_suffix(path, ".tmp");
-        if std::fs::write(&tmp, json).is_err() {
-            return false;
-        }
+        std::fs::write(&tmp, json).map_err(|source| super::Error::ConfigWrite { source })?;
         let _ = std::fs::remove_file(path);
-        std::fs::rename(&tmp, path).is_ok()
+        std::fs::rename(&tmp, path).map_err(|source| super::Error::ConfigWrite { source })?;
+        Ok(())
     }
 
     fn exe_dir() -> PathBuf {
@@ -376,7 +366,7 @@ mod tests {
 
         let mut updated = AppConfig::defaults();
         add_tool(&mut updated, ConfigEnv::Ide, "CodeBuddy", "codebuddy").unwrap();
-        assert!(Config::save(&updated));
+        assert!(Config::save(&updated).is_ok());
         assert_eq!(Config::load(), updated);
         assert!(path.exists());
         assert!(!dir.join("config.json").exists());
@@ -589,7 +579,7 @@ mod tests {
         let dir = temp_dir();
         let mut config = AppConfig::defaults();
         add_tool(&mut config, ConfigEnv::Ide, "CodeBuddy", "codebuddy").unwrap();
-        assert!(Config::save_to_dir(&dir, &config));
+        assert!(Config::save_to_dir(&dir, &config).is_ok());
         let loaded = Config::load_from_dir(&dir);
         assert_eq!(loaded, config);
         assert!(!dir.join("config.json.tmp").exists());
@@ -600,7 +590,7 @@ mod tests {
     fn save_serializes_all_env_keys() {
         let dir = temp_dir();
         let config = AppConfig::defaults();
-        assert!(Config::save_to_dir(&dir, &config));
+        assert!(Config::save_to_dir(&dir, &config).is_ok());
         let text = std::fs::read_to_string(dir.join("config.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(value.get("wsl").is_some());
@@ -615,7 +605,7 @@ mod tests {
         // 未设 PIN：config.json 不含 pin 键
         let config = AppConfig::defaults();
         assert!(config.pin.is_none());
-        assert!(Config::save_to_dir(&dir, &config));
+        assert!(Config::save_to_dir(&dir, &config).is_ok());
         let text = std::fs::read_to_string(dir.join("config.json")).unwrap();
         let value: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert!(value.get("pin").is_none(), "None 时不应写出 pin 键");
@@ -626,7 +616,7 @@ mod tests {
             iterations: 600_000,
             hash: "BBBB".into(),
         });
-        assert!(Config::save_to_dir(&dir, &config));
+        assert!(Config::save_to_dir(&dir, &config).is_ok());
         let loaded = Config::load_from_dir(&dir);
         assert_eq!(loaded.pin.as_ref().unwrap().hash, "BBBB");
         assert_eq!(loaded.pin.as_ref().unwrap().iterations, 600_000);
@@ -657,7 +647,7 @@ mod tests {
             ide: Vec::new(),
             pin: None,
         };
-        assert!(Config::save_to_dir(&dir, &config));
+        assert!(Config::save_to_dir(&dir, &config).is_ok());
         assert_eq!(Config::load_from_dir(&dir), config);
         let _ = std::fs::remove_dir_all(&dir);
     }

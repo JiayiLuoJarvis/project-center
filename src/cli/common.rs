@@ -124,11 +124,8 @@ pub(crate) fn read_hidden_line(prompt: &str) -> Result<String> {
 }
 
 pub(crate) fn save(data: &ProjectData) -> Result<()> {
-    if Store::save(data) {
-        Ok(())
-    } else {
-        Err(crate::Error::Persist(crate::persist::Error::SaveFailed).into())
-    }
+    Store::save(data)?;
+    Ok(())
 }
 
 #[cfg(test)]

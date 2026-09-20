@@ -1,72 +1,29 @@
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD;
 use zeroize::Zeroize;
 
+use super::Error;
 use crate::domain::models::ProjectData;
 
-/// base64 标准编码（无依赖；秘密字段量小，性能无关紧要）。
+/// base64 标准编码。
 pub fn b64_encode(data: &[u8]) -> String {
-    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = chunk.get(1).copied().unwrap_or(0) as u32;
-        let b2 = chunk.get(2).copied().unwrap_or(0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(TABLE[(n >> 18 & 63) as usize] as char);
-        out.push(TABLE[(n >> 12 & 63) as usize] as char);
-        out.push(if chunk.len() > 1 {
-            TABLE[(n >> 6 & 63) as usize] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            TABLE[(n & 63) as usize] as char
-        } else {
-            '='
-        });
-    }
-    out
+    STANDARD.encode(data)
 }
 
 /// base64 标准解码；非法输入返回 None。
 pub fn b64_decode(text: &str) -> Option<Vec<u8>> {
-    fn val(c: u8) -> Option<u32> {
-        match c {
-            b'A'..=b'Z' => Some((c - b'A') as u32),
-            b'a'..=b'z' => Some((c - b'a' + 26) as u32),
-            b'0'..=b'9' => Some((c - b'0' + 52) as u32),
-            b'+' => Some(62),
-            b'/' => Some(63),
-            _ => None,
-        }
-    }
-    let bytes = text.trim().as_bytes();
-    if bytes.is_empty() {
+    let text = text.trim();
+    if text.is_empty() {
         return Some(Vec::new());
     }
-    if !bytes.len().is_multiple_of(4) {
-        return None;
-    }
-    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-    for chunk in bytes.chunks(4) {
-        let pad = chunk.iter().filter(|&&c| c == b'=').count();
-        if pad > 2 || chunk[..4 - pad].contains(&b'=') {
-            return None;
-        }
-        let mut n = 0u32;
-        for &c in &chunk[..4 - pad] {
-            n = (n << 6) | val(c)?;
-        }
-        n <<= 6 * pad as u32;
-        out.extend_from_slice(&n.to_be_bytes()[1..4][..3 - pad]);
-    }
-    Some(out)
+    STANDARD.decode(text).ok()
 }
 
 /// DPAPI 加密（CryptProtectData），返回 base64 密文。
 #[cfg(windows)]
-pub fn protect(plain: &str) -> Result<String, String> {
+pub fn protect(plain: &str) -> Result<String, Error> {
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Cryptography::CryptProtectData;
     use windows_sys::Win32::Security::Cryptography::{
@@ -94,7 +51,10 @@ pub fn protect(plain: &str) -> Result<String, String> {
         )
     };
     plain_bytes.zeroize();
-    if ok == 0 {
+    if ok == 0 || output.pbData.is_null() || output.cbData == 0 {
+        if !output.pbData.is_null() {
+            unsafe { LocalFree(output.pbData.cast()) };
+        }
         return Err("DPAPI 加密失败".into());
     }
     let encrypted =
@@ -105,7 +65,7 @@ pub fn protect(plain: &str) -> Result<String, String> {
 
 /// DPAPI 解密（CryptUnprotectData），输入 base64 密文。
 #[cfg(windows)]
-pub fn unprotect(enc_b64: &str) -> Result<String, String> {
+pub fn unprotect(enc_b64: &str) -> Result<String, Error> {
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Cryptography::CryptUnprotectData;
     use windows_sys::Win32::Security::Cryptography::{
@@ -136,30 +96,38 @@ pub fn unprotect(enc_b64: &str) -> Result<String, String> {
         )
     };
     encrypted.zeroize();
-    if ok == 0 {
+    if ok == 0 || output.pbData.is_null() || output.cbData == 0 {
+        if !output.pbData.is_null() {
+            unsafe { LocalFree(output.pbData.cast()) };
+        }
         return Err("DPAPI 解密失败（密文损坏或来自其他用户/机器）".into());
     }
-    let mut plain =
+    let plain =
         unsafe { std::slice::from_raw_parts(output.pbData, output.cbData as usize) }.to_vec();
     unsafe { LocalFree(output.pbData.cast()) };
-    let result = String::from_utf8(plain.clone()).map_err(|_| "解密结果不是合法 UTF-8".to_string());
-    plain.zeroize();
-    result
+    match String::from_utf8(plain) {
+        Ok(text) => Ok(text),
+        Err(err) => {
+            let mut bytes = err.into_bytes();
+            bytes.zeroize();
+            Err("解密结果不是合法 UTF-8".into())
+        }
+    }
 }
 
 #[cfg(not(windows))]
-pub fn protect(_plain: &str) -> Result<String, String> {
+pub fn protect(_plain: &str) -> Result<String, Error> {
     Err("仅支持 Windows".into())
 }
 
 #[cfg(not(windows))]
-pub fn unprotect(_enc_b64: &str) -> Result<String, String> {
+pub fn unprotect(_enc_b64: &str) -> Result<String, Error> {
     Err("仅支持 Windows".into())
 }
 
 /// 填充密码学随机字节（BCryptGenRandom）。
 #[cfg(windows)]
-pub fn fill_random(buf: &mut [u8]) -> Result<(), String> {
+pub fn fill_random(buf: &mut [u8]) -> Result<(), Error> {
     use windows_sys::Win32::Security::Cryptography::{
         BCRYPT_USE_SYSTEM_PREFERRED_RNG, BCryptGenRandom,
     };
@@ -172,19 +140,19 @@ pub fn fill_random(buf: &mut [u8]) -> Result<(), String> {
         )
     };
     if status != 0 {
-        return Err(format!("BCryptGenRandom 失败: 0x{status:08X}"));
+        return Err(format!("BCryptGenRandom 失败: 0x{status:08X}").into());
     }
     Ok(())
 }
 
 #[cfg(not(windows))]
-pub fn fill_random(_buf: &mut [u8]) -> Result<(), String> {
+pub fn fill_random(_buf: &mut [u8]) -> Result<(), Error> {
     Err("仅支持 Windows".into())
 }
 
 /// PBKDF2-HMAC-SHA256（BCryptDeriveKeyPBKDF2，Windows 自带）。
 #[cfg(windows)]
-fn pbkdf2_sha256(pin: &[u8], salt: &[u8], iterations: u32, out: &mut [u8]) -> Result<(), String> {
+fn pbkdf2_sha256(pin: &[u8], salt: &[u8], iterations: u32, out: &mut [u8]) -> Result<(), Error> {
     use windows_sys::Win32::Security::Cryptography::{
         BCRYPT_ALG_HANDLE, BCRYPT_ALG_HANDLE_HMAC_FLAG, BCryptCloseAlgorithmProvider,
         BCryptDeriveKeyPBKDF2, BCryptOpenAlgorithmProvider,
@@ -209,7 +177,7 @@ fn pbkdf2_sha256(pin: &[u8], salt: &[u8], iterations: u32, out: &mut [u8]) -> Re
             BCRYPT_ALG_HANDLE_HMAC_FLAG,
         );
         if status != 0 {
-            return Err(format!("BCryptOpenAlgorithmProvider 失败: 0x{status:08X}"));
+            return Err(format!("BCryptOpenAlgorithmProvider 失败: 0x{status:08X}").into());
         }
         let status = BCryptDeriveKeyPBKDF2(
             alg,
@@ -224,10 +192,20 @@ fn pbkdf2_sha256(pin: &[u8], salt: &[u8], iterations: u32, out: &mut [u8]) -> Re
         );
         BCryptCloseAlgorithmProvider(alg, 0);
         if status != 0 {
-            return Err(format!("BCryptDeriveKeyPBKDF2 失败: 0x{status:08X}"));
+            return Err(format!("BCryptDeriveKeyPBKDF2 失败: 0x{status:08X}").into());
         }
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn pbkdf2_sha256(
+    _pin: &[u8],
+    _salt: &[u8],
+    _iterations: u32,
+    _out: &mut [u8],
+) -> Result<(), Error> {
+    Err("仅支持 Windows".into())
 }
 
 /// PIN 校验记录：只存 PBKDF2 哈希，绝不存 PIN 本身。
@@ -243,13 +221,13 @@ pub struct PinRecord {
 
 pub const PIN_ITERATIONS: u32 = 600_000;
 /// `verify_pin` 接受的最大迭代数：config.json 可被手工篡改成超大值导致每次
-/// 校验挂死（本机 DoS），钳制上限；超过上限的记录校验必败（视为损坏记录）。
+/// 校验挂死（本机 DoS）。超过上限视为损坏记录，直接失败，不再派生。
 const MAX_VERIFY_ITERATIONS: u32 = 2_000_000;
 const SALT_LEN: usize = 16;
 const HASH_LEN: usize = 32;
 
 /// 生成新的 PIN 校验记录（随机盐 + PBKDF2）。
-pub fn pin_record_from(pin: &str) -> Result<PinRecord, String> {
+pub fn pin_record_from(pin: &str) -> Result<PinRecord, Error> {
     let pin = pin.trim();
     if !pin.bytes().all(|b| b.is_ascii_digit()) || !(4..=12).contains(&pin.len()) {
         return Err("PIN 必须是 4-12 位数字".into());
@@ -268,20 +246,18 @@ pub fn pin_record_from(pin: &str) -> Result<PinRecord, String> {
 }
 
 /// 验证 PIN 是否匹配记录（常数时间比较）。
-pub fn verify_pin(pin: &str, record: &PinRecord) -> Result<bool, String> {
+pub fn verify_pin(pin: &str, record: &PinRecord) -> Result<bool, Error> {
     let pin = pin.trim();
     let salt = b64_decode(&record.salt).ok_or("PIN 盐损坏")?;
     let expected = b64_decode(&record.hash).ok_or("PIN 哈希损坏")?;
     if expected.len() != HASH_LEN {
         return Err("PIN 哈希长度异常".into());
     }
+    if record.iterations == 0 || record.iterations > MAX_VERIFY_ITERATIONS {
+        return Err(Error::PinRecordCorrupt);
+    }
     let mut actual = [0u8; HASH_LEN];
-    pbkdf2_sha256(
-        pin.as_bytes(),
-        &salt,
-        record.iterations.min(MAX_VERIFY_ITERATIONS),
-        &mut actual,
-    )?;
+    pbkdf2_sha256(pin.as_bytes(), &salt, record.iterations, &mut actual)?;
     let mut diff = 0u8;
     for (a, b) in actual.iter().zip(expected.iter()) {
         diff |= a ^ b;
@@ -299,16 +275,138 @@ pub fn data_root() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// key 相对路径 -> 绝对路径（相对数据根解析）。
-pub fn key_file_path_in(root: &Path, relative: &str) -> PathBuf {
-    root.join(relative)
+/// 只接受 `keys/<name>.key`。拒绝绝对路径、`..` 与盘符，避免 JSON 被改后越出数据根。
+fn normalized_key_relative(relative: &str) -> Result<String, Error> {
+    let relative = relative.trim().replace('\\', "/");
+    if relative.is_empty()
+        || relative.starts_with('/')
+        || (relative.len() >= 2 && relative.as_bytes()[1] == b':')
+    {
+        return Err(Error::InvalidKeyPath);
+    }
+    let mut parts = Path::new(&relative).components();
+    let (Some(Component::Normal(dir)), Some(Component::Normal(file)), None) =
+        (parts.next(), parts.next(), parts.next())
+    else {
+        return Err(Error::InvalidKeyPath);
+    };
+    let file = file.to_string_lossy();
+    if dir != "keys" || file == ".key" || !file.ends_with(".key") || file.contains(['/', '\\']) {
+        return Err(Error::InvalidKeyPath);
+    }
+    Ok(format!("keys/{file}"))
 }
 
-/// 原子写 DPAPI 加密的私钥 sidecar，返回相对路径（`keys/<uuid>.key`）。
-pub fn write_key_file_in(root: &Path, project_id: &str, plain_key: &str) -> Result<String, String> {
+fn valid_key_id(id: &str) -> bool {
+    !id.is_empty()
+        && id != "."
+        && id != ".."
+        && !id.contains(['/', '\\', ':', '\0'])
+        && !id.contains("..")
+}
+
+/// key 相对路径 -> 绝对路径（相对数据根解析）。非法相对路径返回错误。
+pub fn key_file_path_in(root: &Path, relative: &str) -> Result<PathBuf, Error> {
+    Ok(root.join(normalized_key_relative(relative)?))
+}
+
+/// 写入仅当前用户可读的文件。Unix 用 `0o600`；Windows 收紧 DACL 为所有者。
+pub fn write_private_file(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(contents)?;
+        file.sync_all()?;
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        std::fs::write(path, contents)?;
+        if let Err(err) = restrict_to_owner(path) {
+            let _ = std::fs::remove_file(path);
+            return Err(err);
+        }
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        std::fs::write(path, contents)
+    }
+}
+
+/// SDDL `D:P(A;;FA;;;OW)`：禁止继承，仅文件所有者可完全控制。
+#[cfg(windows)]
+fn restrict_to_owner(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
+        SetNamedSecurityInfoW,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+
+    let sddl: Vec<u16> = "D:P(A;;FA;;;OW)"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let mut sd = std::ptr::null_mut();
+        let ok = ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut sd,
+            std::ptr::null_mut(),
+        );
+        if ok == 0 || sd.is_null() {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut present = 0;
+        let mut defaulted = 0;
+        let mut dacl = std::ptr::null_mut();
+        let ok = GetSecurityDescriptorDacl(sd, &mut present, &mut dacl, &mut defaulted);
+        if ok == 0 || present == 0 || dacl.is_null() {
+            LocalFree(sd.cast());
+            return Err(std::io::Error::other("无法设置私钥文件 ACL"));
+        }
+        let status = SetNamedSecurityInfoW(
+            wide.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            dacl,
+            std::ptr::null(),
+        );
+        LocalFree(sd.cast());
+        if status != 0 {
+            return Err(std::io::Error::from_raw_os_error(status as i32));
+        }
+    }
+    Ok(())
+}
+
+/// 原子写 DPAPI 加密的私钥 sidecar，返回相对路径（`keys/<id>.key`）。
+pub fn write_key_file_in(root: &Path, project_id: &str, plain_key: &str) -> Result<String, Error> {
     let id = project_id.trim();
     if id.is_empty() {
         return Err("项目缺少 id，无法保存密钥文件".into());
+    }
+    if !valid_key_id(id) {
+        return Err(Error::InvalidKeyPath);
     }
     if plain_key.is_empty() {
         return Err("密钥内容为空".into());
@@ -317,7 +415,8 @@ pub fn write_key_file_in(root: &Path, project_id: &str, plain_key: &str) -> Resu
     let dir = root.join("keys");
     std::fs::create_dir_all(&dir).map_err(|e| format!("无法创建密钥目录: {e}"))?;
     let tmp = dir.join(format!("{}.key.tmp", uuid::Uuid::new_v4()));
-    std::fs::write(&tmp, &encrypted).map_err(|e| format!("写入密钥临时文件失败: {e}"))?;
+    write_private_file(&tmp, encrypted.as_bytes())
+        .map_err(|e| format!("写入密钥临时文件失败: {e}"))?;
     let target = dir.join(format!("{id}.key"));
     // Windows 的 rename 不覆盖目标：先删旧文件。写失败不破坏旧文件由 tmp 中转保证。
     let _ = std::fs::remove_file(&target);
@@ -326,34 +425,35 @@ pub fn write_key_file_in(root: &Path, project_id: &str, plain_key: &str) -> Resu
 }
 
 /// 读取并解密私钥 sidecar。
-pub fn read_key_file_in(root: &Path, relative: &str) -> Result<String, String> {
-    let path = key_file_path_in(root, relative);
+pub fn read_key_file_in(root: &Path, relative: &str) -> Result<String, Error> {
+    let path = key_file_path_in(root, relative)?;
     let encrypted = std::fs::read_to_string(&path).map_err(|e| format!("读取密钥文件失败: {e}"))?;
     unprotect(encrypted.trim())
 }
 
 /// 删除私钥 sidecar；不存在视为成功。失败返回 Err 供调用方记录延迟重试。
-pub fn delete_key_file_in(root: &Path, relative: &str) -> Result<(), String> {
+pub fn delete_key_file_in(root: &Path, relative: &str) -> Result<(), Error> {
     if relative.trim().is_empty() {
         return Ok(());
     }
-    match std::fs::remove_file(key_file_path_in(root, relative)) {
+    let path = key_file_path_in(root, relative)?;
+    match std::fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(format!("删除密钥文件失败: {e}")),
+        Err(e) => Err(format!("删除密钥文件失败: {e}").into()),
     }
 }
 
 /// 生产路径包装（真实数据根）。
-pub fn write_key_file(project_id: &str, plain_key: &str) -> Result<String, String> {
+pub fn write_key_file(project_id: &str, plain_key: &str) -> Result<String, Error> {
     write_key_file_in(&data_root(), project_id, plain_key)
 }
 
-pub fn read_key_file(relative: &str) -> Result<String, String> {
+pub fn read_key_file(relative: &str) -> Result<String, Error> {
     read_key_file_in(&data_root(), relative)
 }
 
-pub fn delete_key_file(relative: &str) -> Result<(), String> {
+pub fn delete_key_file(relative: &str) -> Result<(), Error> {
     delete_key_file_in(&data_root(), relative)
 }
 
@@ -515,6 +615,43 @@ mod tests {
         assert_eq!(b64_encode(b"fo"), "Zm8=");
         assert_eq!(b64_encode(b"foo"), "Zm9v");
         assert_eq!(b64_encode(b"foob"), "Zm9vYg==");
+    }
+
+    #[test]
+    fn verify_pin_rejects_excessive_iterations() {
+        let record = PinRecord {
+            salt: b64_encode(&[1; 16]),
+            iterations: MAX_VERIFY_ITERATIONS + 1,
+            hash: b64_encode(&[2; 32]),
+        };
+        let err = verify_pin("1234", &record).unwrap_err();
+        assert!(err.to_string().contains("损坏"), "{err}");
+    }
+
+    #[test]
+    fn key_relative_rejects_escape() {
+        let root = temp_root();
+        let outside = root.join("outside.txt");
+        std::fs::write(&outside, "keep").unwrap();
+        assert!(delete_key_file_in(&root, "../outside.txt").is_err());
+        assert!(outside.exists());
+        assert!(read_key_file_in(&root, "keys/../../outside.txt").is_err());
+        assert!(read_key_file_in(&root, "/tmp/x.key").is_err());
+        assert!(write_key_file_in(&root, "..", "secret").is_err());
+        assert!(write_key_file_in(&root, "a/b", "secret").is_err());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = temp_root();
+        let path = root.join("plain.key");
+        write_private_file(&path, b"secret").unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[cfg(windows)]
