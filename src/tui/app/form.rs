@@ -46,14 +46,30 @@ impl App {
     ) {
         self.clear_key = false;
         let cursor = Self::field_end_cursor(&fields, 0);
+        let interaction = Self::initial_interaction(&kind);
         self.mode = Mode::Form {
             title: title.into(),
             fields,
             focus: 0,
             cursor,
             kind,
+            interaction,
             error: None,
         };
+    }
+
+    fn initial_interaction(kind: &FormKind) -> FormInteraction {
+        match kind {
+            FormKind::EditProject { .. } => FormInteraction::View,
+            _ => FormInteraction::Insert,
+        }
+    }
+
+    fn project_form_kind(kind: &FormKind) -> bool {
+        matches!(
+            kind,
+            FormKind::AddProject { .. } | FormKind::EditProject { .. }
+        )
     }
 
     /// 文本/密码字段的字符长度；非编辑字段为 0。
@@ -265,10 +281,12 @@ impl App {
             focus: suspended.focus,
             cursor,
             kind: suspended.kind,
+            interaction: suspended.interaction,
             error: None,
         };
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn set_form_state(
         &mut self,
         title: String,
@@ -276,6 +294,7 @@ impl App {
         focus: usize,
         kind: FormKind,
         cursor: usize,
+        interaction: FormInteraction,
         error: Option<String>,
     ) {
         let focus = if fields.is_empty() {
@@ -290,6 +309,7 @@ impl App {
             focus,
             cursor,
             kind,
+            interaction,
             error,
         };
     }
@@ -306,6 +326,7 @@ impl App {
             mut focus,
             mut cursor,
             kind,
+            interaction,
             ..
         } = self.mode.clone()
         else {
@@ -318,9 +339,23 @@ impl App {
         focus = focus.min(fields.len() - 1);
         cursor = Self::clamp_cursor(&fields, focus, cursor);
 
+        if interaction == FormInteraction::View {
+            return self.handle_form_view(key, title, fields, focus, cursor, kind);
+        }
+
         match key.code {
             KeyCode::Esc => {
-                if let FormKind::AddConnection {
+                if Self::project_form_kind(&kind) {
+                    self.set_form_state(
+                        title,
+                        fields,
+                        focus,
+                        kind,
+                        cursor,
+                        FormInteraction::View,
+                        None,
+                    );
+                } else if let FormKind::AddConnection {
                     resume: Some(suspended),
                 } = kind
                 {
@@ -333,28 +368,76 @@ impl App {
             KeyCode::Tab | KeyCode::Down => {
                 focus = (focus + 1) % fields.len();
                 cursor = Self::field_end_cursor(&fields, focus);
-                self.set_form_state(title, fields, focus, kind, cursor, None);
+                self.set_form_state(
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    cursor,
+                    FormInteraction::Insert,
+                    None,
+                );
             }
             KeyCode::BackTab | KeyCode::Up => {
                 focus = (focus + fields.len() - 1) % fields.len();
                 cursor = Self::field_end_cursor(&fields, focus);
-                self.set_form_state(title, fields, focus, kind, cursor, None);
+                self.set_form_state(
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    cursor,
+                    FormInteraction::Insert,
+                    None,
+                );
             }
             KeyCode::Left => {
                 cursor = cursor.saturating_sub(1);
-                self.set_form_state(title, fields, focus, kind, cursor, None);
+                self.set_form_state(
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    cursor,
+                    FormInteraction::Insert,
+                    None,
+                );
             }
             KeyCode::Right => {
                 cursor = (cursor + 1).min(Self::field_char_len(&fields, focus));
-                self.set_form_state(title, fields, focus, kind, cursor, None);
+                self.set_form_state(
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    cursor,
+                    FormInteraction::Insert,
+                    None,
+                );
             }
             KeyCode::Home => {
                 cursor = 0;
-                self.set_form_state(title, fields, focus, kind, cursor, None);
+                self.set_form_state(
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    cursor,
+                    FormInteraction::Insert,
+                    None,
+                );
             }
             KeyCode::End => {
                 cursor = Self::field_end_cursor(&fields, focus);
-                self.set_form_state(title, fields, focus, kind, cursor, None);
+                self.set_form_state(
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    cursor,
+                    FormInteraction::Insert,
+                    None,
+                );
             }
             KeyCode::Backspace => {
                 match fields.get_mut(focus) {
@@ -368,7 +451,15 @@ impl App {
                     }
                     _ => {}
                 }
-                self.set_form_state(title, fields, focus, kind, cursor, None);
+                self.set_form_state(
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    cursor,
+                    FormInteraction::Insert,
+                    None,
+                );
             }
             KeyCode::Delete => {
                 if let Some(FormField::Text { value, .. } | FormField::Password { value, .. }) =
@@ -376,7 +467,15 @@ impl App {
                 {
                     cursor = Self::delete_char_at(value, cursor);
                 }
-                self.set_form_state(title, fields, focus, kind, cursor, None);
+                self.set_form_state(
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    cursor,
+                    FormInteraction::Insert,
+                    None,
+                );
             }
             KeyCode::Char('u') | KeyCode::Char('U')
                 if key.modifiers.contains(KeyModifiers::CONTROL) =>
@@ -393,7 +492,15 @@ impl App {
                     }
                     _ => {}
                 }
-                self.set_form_state(title, fields, focus, kind, cursor, None);
+                self.set_form_state(
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    cursor,
+                    FormInteraction::Insert,
+                    None,
+                );
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                 if let Some(FormField::Text { value, .. } | FormField::Password { value, .. }) =
@@ -401,7 +508,15 @@ impl App {
                 {
                     cursor = Self::insert_char_at(value, cursor, c);
                 }
-                self.set_form_state(title, fields, focus, kind, cursor, None);
+                self.set_form_state(
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    cursor,
+                    FormInteraction::Insert,
+                    None,
+                );
             }
             KeyCode::Enter => match fields.get(focus) {
                 Some(FormField::Select { .. }) => {
@@ -411,6 +526,7 @@ impl App {
                         focus,
                         cursor,
                         kind,
+                        interaction: FormInteraction::Insert,
                     };
                     self.open_connection_picker(data, suspended);
                     return Outcome::Continue;
@@ -424,14 +540,38 @@ impl App {
                             }
                             self.clear_key = true;
                             cursor = Self::field_end_cursor(&fields, target);
-                            self.set_form_state(title, fields, target, kind, cursor, None);
+                            self.set_form_state(
+                                title,
+                                fields,
+                                target,
+                                kind,
+                                cursor,
+                                FormInteraction::Insert,
+                                None,
+                            );
                         }
                         ButtonAction::PickFolder { target } => {
-                            self.set_form_state(title, fields, focus, kind, cursor, None);
+                            self.set_form_state(
+                                title,
+                                fields,
+                                focus,
+                                kind,
+                                cursor,
+                                FormInteraction::Insert,
+                                None,
+                            );
                             return Outcome::PickFolder { target };
                         }
                         ButtonAction::PickFile { target } => {
-                            self.set_form_state(title, fields, focus, kind, cursor, None);
+                            self.set_form_state(
+                                title,
+                                fields,
+                                focus,
+                                kind,
+                                cursor,
+                                FormInteraction::Insert,
+                                None,
+                            );
                             return Outcome::PickFile { target };
                         }
                     }
@@ -443,16 +583,127 @@ impl App {
                         focus,
                         kind.clone(),
                         cursor,
+                        FormInteraction::Insert,
                         None,
                     );
                     return self.submit_form(kind, &fields, data, config);
                 }
             },
             _ => {
-                self.set_form_state(title, fields, focus, kind, cursor, None);
+                self.set_form_state(
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    cursor,
+                    FormInteraction::Insert,
+                    None,
+                );
             }
         }
         Outcome::Continue
+    }
+
+    fn handle_form_view(
+        &mut self,
+        key: KeyEvent,
+        title: String,
+        fields: Vec<FormField>,
+        mut focus: usize,
+        mut cursor: usize,
+        kind: FormKind,
+    ) -> Outcome {
+        match key.code {
+            KeyCode::Esc => {
+                self.back_to_browse();
+                return Outcome::Continue;
+            }
+            KeyCode::Tab | KeyCode::Down | KeyCode::Right | KeyCode::Char('j') => {
+                focus = (focus + 1) % fields.len();
+                cursor = Self::field_end_cursor(&fields, focus);
+            }
+            KeyCode::BackTab | KeyCode::Up | KeyCode::Left | KeyCode::Char('k') => {
+                focus = (focus + fields.len() - 1) % fields.len();
+                cursor = Self::field_end_cursor(&fields, focus);
+            }
+            KeyCode::Char('i') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.set_form_state(
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    cursor,
+                    FormInteraction::Insert,
+                    None,
+                );
+                return Outcome::Continue;
+            }
+            KeyCode::Char('y') if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.yank_focused_field(&fields, focus);
+                self.set_form_state(
+                    title,
+                    fields,
+                    focus,
+                    kind,
+                    cursor,
+                    FormInteraction::View,
+                    None,
+                );
+                return Outcome::Continue;
+            }
+            KeyCode::Backspace
+            | KeyCode::Delete
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::Enter => {}
+            KeyCode::Char('u') | KeyCode::Char('U')
+                if key.modifiers.contains(KeyModifiers::CONTROL) => {}
+            KeyCode::Char(_) if !key.modifiers.contains(KeyModifiers::CONTROL) => {}
+            _ => {}
+        }
+        self.set_form_state(
+            title,
+            fields,
+            focus,
+            kind,
+            cursor,
+            FormInteraction::View,
+            None,
+        );
+        Outcome::Continue
+    }
+
+    fn yank_focused_field(&mut self, fields: &[FormField], focus: usize) {
+        match fields.get(focus) {
+            Some(FormField::Password { .. }) => {
+                self.flash("密码字段不可复制");
+            }
+            Some(FormField::Text { value, .. }) => {
+                let text = value.as_str();
+                if text.is_empty() {
+                    self.flash("内容为空，未复制");
+                    return;
+                }
+                match crate::clipboard::set_text(text) {
+                    Ok(()) => self.flash("已复制"),
+                    Err(e) => self.flash(e),
+                }
+            }
+            Some(FormField::Select { value, .. }) => {
+                let text = value.as_str();
+                if text.is_empty() {
+                    self.flash("内容为空，未复制");
+                    return;
+                }
+                match crate::clipboard::set_text(text) {
+                    Ok(()) => self.flash("已复制"),
+                    Err(e) => self.flash(e),
+                }
+            }
+            Some(FormField::Button { .. }) | None => {
+                self.flash("该字段不可复制");
+            }
+        }
     }
 
     pub(crate) fn submit_form(
@@ -588,6 +839,7 @@ impl App {
             focus,
             cursor,
             kind,
+            interaction,
             ..
         } = self.mode.clone()
         else {
@@ -616,7 +868,7 @@ impl App {
                     }
                 }
                 let cursor = Self::field_end_cursor(&fields, target);
-                self.set_form_state(title, fields, target, kind, cursor, None);
+                self.set_form_state(title, fields, target, kind, cursor, interaction, None);
             }
             None => {
                 self.set_form_state(
@@ -625,6 +877,7 @@ impl App {
                     focus,
                     kind,
                     cursor,
+                    interaction,
                     Some("已取消选择文件夹".into()),
                 );
             }
@@ -638,6 +891,7 @@ impl App {
             focus,
             cursor,
             kind,
+            interaction,
             ..
         } = self.mode.clone()
         else {
@@ -650,7 +904,7 @@ impl App {
                 }
                 self.clear_key = false;
                 let cursor = Self::field_end_cursor(&fields, target);
-                self.set_form_state(title, fields, target, kind, cursor, None);
+                self.set_form_state(title, fields, target, kind, cursor, interaction, None);
             }
             None => {
                 self.set_form_state(
@@ -659,6 +913,7 @@ impl App {
                     focus,
                     kind,
                     cursor,
+                    interaction,
                     Some("已取消选择文件".into()),
                 );
             }

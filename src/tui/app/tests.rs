@@ -586,9 +586,7 @@ fn form_text_cursor_moves_and_edits_mid_string() {
     app.handle(key(KeyCode::Char('X')), &mut data, &mut config);
     app.handle(key(KeyCode::Delete), &mut data, &mut config);
     match &app.mode {
-        Mode::Form {
-            fields, cursor, ..
-        } => {
+        Mode::Form { fields, cursor, .. } => {
             // abcd → ←← → 光标在 c 前 → Backspace 删 b → aXcd → Delete 删 c → aXd
             assert_eq!(App::field_value(fields, 0), "aXd");
             assert_eq!(*cursor, 2);
@@ -621,9 +619,7 @@ fn form_text_cursor_handles_unicode() {
     app.handle(key(KeyCode::Right), &mut data, &mut config);
     app.handle(key(KeyCode::Delete), &mut data, &mut config);
     match &app.mode {
-        Mode::Form {
-            fields, cursor, ..
-        } => {
+        Mode::Form { fields, cursor, .. } => {
             assert_eq!(App::field_value(fields, 0), "中路径");
             assert_eq!(*cursor, 1);
         }
@@ -1017,6 +1013,7 @@ fn edit_ssh_project_keeps_connection_on_save() {
     app.focus = Focus::Projects;
     app.left_sel = 0;
     app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
+    app.handle(key(KeyCode::Char('i')), &mut data, &mut config);
     app.handle(key(KeyCode::Enter), &mut data, &mut config);
     match &app.mode {
         Mode::Browse => {}
@@ -1087,4 +1084,122 @@ fn filter_alias_wk_does_not_take_index_branch() {
     app.left_sel = 0;
     app.filter = "wk".into();
     assert_eq!(app.filtered_project_indices(&data, 0), vec![0]);
+}
+
+#[test]
+fn form_view_edit_opens_view_add_opens_insert() {
+    let mut data = sample();
+    let mut config = AppConfig::defaults();
+    let mut app = App::new(&data);
+    app.focus = Focus::Projects;
+    app.left_sel = 0;
+    app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
+    match &app.mode {
+        Mode::Form {
+            kind: FormKind::EditProject { .. },
+            interaction: FormInteraction::View,
+            ..
+        } => {}
+        other => panic!("expected EditProject VIEW, got {other:?}"),
+    }
+    app.handle(key(KeyCode::Esc), &mut data, &mut config);
+    app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
+    match &app.mode {
+        Mode::Form {
+            kind: FormKind::AddProject { .. },
+            interaction: FormInteraction::Insert,
+            ..
+        } => {}
+        other => panic!("expected AddProject INSERT, got {other:?}"),
+    }
+}
+
+#[test]
+fn form_view_no_mutate() {
+    let mut data = sample();
+    let mut config = AppConfig::defaults();
+    let mut app = App::new(&data);
+    app.focus = Focus::Projects;
+    app.left_sel = 0;
+    app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
+    let before = match &app.mode {
+        Mode::Form { fields, .. } => App::field_value(fields, ProjectField::Name as usize),
+        other => panic!("expected form, got {other:?}"),
+    };
+    app.handle(key(KeyCode::Char('a')), &mut data, &mut config);
+    app.handle(key(KeyCode::Backspace), &mut data, &mut config);
+    app.handle(key(KeyCode::Delete), &mut data, &mut config);
+    let mut ctrl_u = key(KeyCode::Char('u'));
+    ctrl_u.modifiers = KeyModifiers::CONTROL;
+    app.handle(ctrl_u, &mut data, &mut config);
+    match &app.mode {
+        Mode::Form {
+            fields,
+            interaction: FormInteraction::View,
+            ..
+        } => assert_eq!(
+            App::field_value(fields, ProjectField::Name as usize),
+            before
+        ),
+        other => panic!("expected unchanged VIEW form, got {other:?}"),
+    }
+}
+
+#[test]
+fn form_view_i_esc_keeps_edits() {
+    let mut data = sample();
+    let mut config = AppConfig::defaults();
+    let mut app = App::new(&data);
+    app.focus = Focus::Projects;
+    app.left_sel = 0;
+    app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
+    app.handle(key(KeyCode::Char('i')), &mut data, &mut config);
+    match &app.mode {
+        Mode::Form {
+            interaction: FormInteraction::Insert,
+            ..
+        } => {}
+        other => panic!("expected INSERT, got {other:?}"),
+    }
+    type_chars(&mut app, &mut data, &mut config, "Z");
+    app.handle(key(KeyCode::Esc), &mut data, &mut config);
+    match &app.mode {
+        Mode::Form {
+            fields,
+            interaction: FormInteraction::View,
+            ..
+        } => {
+            let name = App::field_value(fields, ProjectField::Name as usize);
+            assert!(name.ends_with('Z'), "expected edit kept, got {name}");
+        }
+        other => panic!("expected VIEW with edit, got {other:?}"),
+    }
+}
+
+#[test]
+fn form_yank_text_and_password_refuse() {
+    let mut data = sample();
+    let mut config = AppConfig::defaults();
+    let mut app = App::new(&data);
+    app.focus = Focus::Projects;
+    app.left_sel = 0;
+    app.handle(key(KeyCode::Char('e')), &mut data, &mut config);
+    app.handle(key(KeyCode::Tab), &mut data, &mut config);
+    app.handle(key(KeyCode::Char('y')), &mut data, &mut config);
+    assert_eq!(app.flash.as_deref(), Some("内容为空，未复制"));
+
+    app.mode = Mode::Form {
+        title: "测".into(),
+        fields: vec![App::password_field_with_hint("密码", "（未设置）")],
+        focus: 0,
+        cursor: 0,
+        kind: FormKind::EditProject {
+            group: "dev".into(),
+            project_id: data.groups[0].projects[0].id.clone(),
+        },
+        interaction: FormInteraction::View,
+        error: None,
+    };
+    app.handle(key(KeyCode::Char('y')), &mut data, &mut config);
+    assert_eq!(app.flash.as_deref(), Some("密码字段不可复制"));
 }

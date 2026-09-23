@@ -137,6 +137,13 @@ pub enum ButtonAction {
     ClearKey { target: usize },
 }
 
+/// 项目表单的查看/插入；其它表单种类固定为 Insert。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FormInteraction {
+    View,
+    Insert,
+}
+
 #[derive(Clone, Debug)]
 pub enum FormField {
     Text {
@@ -168,6 +175,7 @@ pub struct SuspendedForm {
     /// 当前焦点文本/密码框内的字符光标下标。
     pub cursor: usize,
     pub kind: FormKind,
+    pub interaction: FormInteraction,
 }
 
 #[derive(Clone, Debug)]
@@ -289,6 +297,7 @@ pub enum Mode {
         /// 当前焦点文本/密码框内的字符光标下标。
         cursor: usize,
         kind: FormKind,
+        interaction: FormInteraction,
         error: Option<String>,
     },
     Confirm {

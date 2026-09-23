@@ -6,7 +6,7 @@ use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragra
 
 use crate::domain::models::ProjectData;
 use crate::persist::AppConfig;
-use crate::tui::app::{App, Focus, FormField, Mode, RightPane, SETTINGS_ITEMS};
+use crate::tui::app::{App, Focus, FormField, FormInteraction, Mode, RightPane, SETTINGS_ITEMS};
 use crate::tui::theme;
 use crate::tui::widgets;
 
@@ -61,9 +61,19 @@ pub fn render(frame: &mut Frame, app: &App, data: &ProjectData, config: &AppConf
             fields,
             focus,
             cursor,
+            interaction,
             error,
             ..
-        } => render_form(frame, area, title, fields, *focus, *cursor, error.as_deref()),
+        } => render_form(
+            frame,
+            area,
+            title,
+            fields,
+            *focus,
+            *cursor,
+            *interaction,
+            error.as_deref(),
+        ),
         Mode::Filter => render_input(frame, chunks[2], "/", &app.filter, true),
         Mode::Browse => {}
     }
@@ -544,6 +554,7 @@ fn render_confirm(frame: &mut Frame, area: Rect, message: &str) {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_form(
     frame: &mut Frame,
     area: Rect,
@@ -551,12 +562,20 @@ fn render_form(
     fields: &[FormField],
     focus: usize,
     cursor: usize,
+    interaction: FormInteraction,
     error: Option<&str>,
 ) {
     let area = modal_area(area);
     frame.render_widget(Clear, area);
+    let mode_tag = match interaction {
+        FormInteraction::View => "VIEW",
+        FormInteraction::Insert => "INSERT",
+    };
     let block = Block::default()
-        .title(Span::styled(format!(" {title} "), theme::title()))
+        .title(Span::styled(
+            format!(" {title} · {mode_tag} "),
+            theme::title(),
+        ))
         .borders(Borders::ALL)
         .border_style(theme::border(true))
         .style(theme::panel());
@@ -685,10 +704,13 @@ fn render_form(
         lines.push(Line::from(Span::styled(err.to_string(), theme::danger())));
         lines.push(Line::from(""));
     }
-    lines.push(Line::from(Span::styled(
-        "←→ 光标  Tab 切换  Enter 提交/确认  Ctrl+U 清空  Esc 取消",
-        theme::muted(),
-    )));
+    let hint = match interaction {
+        FormInteraction::View => "i 编辑  y 复制  Tab/j/k 切换  Esc 返回",
+        FormInteraction::Insert => {
+            "←→ 光标  Tab 切换  Enter 提交/确认  Ctrl+U 清空  Esc 回查看/取消"
+        }
+    };
+    lines.push(Line::from(Span::styled(hint, theme::muted())));
 
     // 按 inner 宽高量真实折行高度，保证焦点字段（含底部密码块）整块可见。
     let scroll = form_scroll_offset(fields, focus, inner.width, inner.height, error.is_some());

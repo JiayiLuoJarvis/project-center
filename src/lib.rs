@@ -2,6 +2,7 @@
 
 pub mod cli;
 
+pub(crate) mod clipboard;
 pub(crate) mod domain;
 pub(crate) mod launch;
 pub(crate) mod persist;
