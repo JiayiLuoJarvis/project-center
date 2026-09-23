@@ -52,7 +52,7 @@ fn set_text_windows(text: &str) -> Result<(), String> {
         std::ptr::copy_nonoverlapping(wide.as_ptr(), ptr.cast::<u16>(), wide.len());
         GlobalUnlock(handle);
 
-        let data: HANDLE = SetClipboardData(CF_UNICODETEXT, handle);
+        let data: HANDLE = SetClipboardData(u32::from(CF_UNICODETEXT), handle);
         if data.is_null() {
             return Err("无法写入剪贴板".into());
         }
