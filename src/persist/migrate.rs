@@ -317,20 +317,19 @@ mod tests {
             }],
             ..Default::default()
         };
-        let pack = MigratePack::pack(&incoming, &AppConfig {
-            wsl: vec![Tool::new("y", "y")],
-            powershell: vec![],
-            ide: vec![],
-            pin: None,
-        });
+        let pack = MigratePack::pack(
+            &incoming,
+            &AppConfig {
+                wsl: vec![Tool::new("y", "y")],
+                powershell: vec![],
+                ide: vec![],
+                pin: None,
+            },
+        );
         let mut live = prior.clone();
         let mut cfg = sample_config();
         let cfg_path = dir.join("config.json");
-        std::fs::write(
-            &cfg_path,
-            serde_json::to_string(&cfg).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(&cfg_path, serde_json::to_string(&cfg).unwrap()).unwrap();
         let _cfg_guard = test_env::ConfigPathGuard::redirect(&cfg_path);
         let msg = import_replace(&mut live, &mut cfg, pack).unwrap();
 
@@ -348,11 +347,7 @@ mod tests {
         let config_snaps: Vec<_> = std::fs::read_dir(data_root.join("backups"))
             .unwrap()
             .filter_map(|e| e.ok())
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("config-")
-            })
+            .filter(|e| e.file_name().to_string_lossy().starts_with("config-"))
             .collect();
         assert_eq!(config_snaps.len(), 1);
         // 密钥已移出 keys\
