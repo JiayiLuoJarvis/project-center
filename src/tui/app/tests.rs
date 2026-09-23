@@ -266,6 +266,33 @@ fn settings_opens_trash_and_config() {
 }
 
 #[test]
+fn settings_migrate_export_import_and_backups() {
+    assert_eq!(SETTINGS_ITEMS.len(), 6);
+    assert_eq!(SETTINGS_ITEMS[3], "导出配置");
+    assert_eq!(SETTINGS_ITEMS[4], "导入配置");
+    assert_eq!(SETTINGS_ITEMS[5], "数据备份");
+
+    let mut data = sample();
+    let mut config = AppConfig::defaults();
+    let mut app = App::new(&data);
+    app.handle(key(KeyCode::Char(',')), &mut data, &mut config);
+    for _ in 0..3 {
+        app.handle(key(KeyCode::Char('j')), &mut data, &mut config);
+    }
+    let out = app.handle(key(KeyCode::Enter), &mut data, &mut config);
+    assert!(matches!(out, Outcome::SaveMigrateFile));
+    // 仍停在设置选中导出；再 j 一次到导入
+    let out = app.handle(key(KeyCode::Char('j')), &mut data, &mut config);
+    assert!(matches!(out, Outcome::Continue));
+    let out = app.handle(key(KeyCode::Enter), &mut data, &mut config);
+    assert!(matches!(out, Outcome::PickMigrateFile));
+    // 再 j 到数据备份
+    app.handle(key(KeyCode::Char('j')), &mut data, &mut config);
+    app.handle(key(KeyCode::Enter), &mut data, &mut config);
+    assert!(matches!(app.right_pane, RightPane::Backups));
+}
+
+#[test]
 fn left_list_has_no_trash_or_config() {
     let data = sample();
     let app = App::new(&data);
