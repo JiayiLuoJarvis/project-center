@@ -228,10 +228,12 @@ pub enum ProjectField {
     WslPath = 4,
     Connection = 5,
     RemotePath = 6,
+    GitRemote = 7,
+    Notes = 8,
 }
 
 impl ProjectField {
-    pub const COUNT: usize = 7;
+    pub const COUNT: usize = 9;
 }
 
 impl From<ProjectField> for usize {

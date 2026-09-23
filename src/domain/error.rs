@@ -30,7 +30,7 @@ pub enum Error {
     ProjectAliasExists { alias: String },
     #[error("项目别名不能与项目名相同")]
     ProjectAliasSameAsName,
-    #[error("至少提供一个修改项: --new-name、--alias、--dir 或 --wsl-path")]
+    #[error("至少提供一个修改项: --new-name、--alias、--dir、--wsl-path、--git-remote 或 --notes")]
     EditProjectNoFields,
     #[error("项目名不能为空")]
     ProjectNameEmpty,

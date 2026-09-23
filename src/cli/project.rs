@@ -45,6 +45,12 @@ pub(crate) fn cmd_add(args: AddArgs) -> Result<()> {
     if let Some(alias) = args.alias {
         project.alias = alias.trim().to_string();
     }
+    if let Some(git_remote) = args.git_remote {
+        project.git_remote = git_remote.trim().to_string();
+    }
+    if let Some(notes) = args.notes {
+        project.notes = notes.trim().to_string();
+    }
     ops::add_project(&mut data, &args.group, project)?;
     apply_connection_secrets(
         &mut data,
@@ -69,7 +75,9 @@ pub(crate) fn cmd_edit(args: EditArgs) -> Result<()> {
     let has_local = args.new_name.is_some()
         || args.alias.is_some()
         || path.is_some()
-        || args.wsl_path.is_some();
+        || args.wsl_path.is_some()
+        || args.git_remote.is_some()
+        || args.notes.is_some();
     if has_local {
         ops::edit_project_full(
             &mut data,
@@ -79,6 +87,8 @@ pub(crate) fn cmd_edit(args: EditArgs) -> Result<()> {
             args.alias.as_deref(),
             path.as_deref(),
             args.wsl_path.as_deref(),
+            args.git_remote.as_deref(),
+            args.notes.as_deref(),
         )?;
     }
     if args.clear_ssh {

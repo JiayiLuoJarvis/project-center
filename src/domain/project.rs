@@ -24,6 +24,7 @@ pub fn add_project(data: &mut ProjectData, group_name: &str, project: Project) -
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn edit_project_full(
     data: &mut ProjectData,
     name: &str,
@@ -32,8 +33,16 @@ pub fn edit_project_full(
     alias: Option<&str>,
     path: Option<&str>,
     wsl_path: Option<&str>,
+    git_remote: Option<&str>,
+    notes: Option<&str>,
 ) -> Result<()> {
-    if new_name.is_none() && alias.is_none() && path.is_none() && wsl_path.is_none() {
+    if new_name.is_none()
+        && alias.is_none()
+        && path.is_none()
+        && wsl_path.is_none()
+        && git_remote.is_none()
+        && notes.is_none()
+    {
         return Err(Error::EditProjectNoFields);
     }
     let (group_index, project_index) = find_project(data, name, group)?;
@@ -74,6 +83,12 @@ pub fn edit_project_full(
     }
     if let Some(wsl_path) = wsl_path {
         data.groups[group_index].projects[project_index].wsl_path = wsl_path.trim().to_string();
+    }
+    if let Some(git_remote) = git_remote {
+        data.groups[group_index].projects[project_index].git_remote = git_remote.trim().to_string();
+    }
+    if let Some(notes) = notes {
+        data.groups[group_index].projects[project_index].notes = notes.trim().to_string();
     }
     Ok(())
 }

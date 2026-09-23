@@ -77,6 +77,8 @@ fn restore_project(data: &mut ProjectData, item: DeletedItem) -> Result<String> 
         default_tool: item.default_tool.clone(),
         commands: item.commands.clone(),
         connection_id: item.connection_id.clone(),
+        git_remote: item.git_remote.clone(),
+        notes: item.notes.clone(),
     };
     project.ensure_id();
     // id 已被现有项目占用时重新生成

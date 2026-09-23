@@ -98,6 +98,7 @@ pub fn remove_group(data: &mut ProjectData, name: &str) -> Result<String, Error>
     Ok(format!("分组已删除: {name}（已移入回收站）"))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn add_project_paths(
     data: &mut ProjectData,
     group: &str,
@@ -105,6 +106,8 @@ pub fn add_project_paths(
     alias: &str,
     path: &str,
     wsl_path: &str,
+    git_remote: &str,
+    notes: &str,
 ) -> Result<String, Error> {
     let name = name.trim();
     if name.is_empty() {
@@ -130,12 +133,16 @@ pub fn add_project_paths(
         }
         wsl
     };
-    let project = Project::new(name, path, wsl).with_alias(alias.trim());
+    let project = Project::new(name, path, wsl)
+        .with_alias(alias.trim())
+        .with_git_remote(git_remote.trim())
+        .with_notes(notes.trim());
     ops::add_project(data, group, project)?;
     save_data(data)?;
     Ok(format!("项目已添加: {name}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn edit_project(
     data: &mut ProjectData,
     group: &str,
@@ -144,6 +151,8 @@ pub fn edit_project(
     alias: &str,
     path: &str,
     wsl_path: &str,
+    git_remote: &str,
+    notes: &str,
 ) -> Result<String, Error> {
     let new_name = new_name.trim();
     let path = path.trim();
@@ -156,6 +165,8 @@ pub fn edit_project(
         Some(alias.trim()),
         Some(path),
         Some(wsl_path),
+        Some(git_remote.trim()),
+        Some(notes.trim()),
     )?;
     save_data(data)?;
     Ok(format!("项目已更新: {new_name}"))
@@ -168,6 +179,8 @@ pub struct ProjectInput {
     pub wsl_path: String,
     pub connection_id: String,
     pub remote_path: String,
+    pub git_remote: String,
+    pub notes: String,
 }
 
 pub struct SecretInput {
@@ -205,6 +218,8 @@ pub fn save_project(
                     Some(input.alias.trim()),
                     None,
                     None,
+                    Some(input.git_remote.trim()),
+                    Some(input.notes.trim()),
                 )?;
                 let (gi, pi) = ops::find_project_by_id(data, id, Some(group))?;
                 data.attach_connection(gi, pi, cid, &input.remote_path)?;
@@ -214,7 +229,9 @@ pub fn save_project(
             None => {
                 let project = Project::new(name, input.remote_path.trim(), "")
                     .with_connection(cid)
-                    .with_alias(input.alias.trim());
+                    .with_alias(input.alias.trim())
+                    .with_git_remote(input.git_remote.trim())
+                    .with_notes(input.notes.trim());
                 ops::add_project(data, group, project)?;
                 save_data(data)?;
                 Ok(format!("项目已添加: {name}"))
@@ -237,6 +254,8 @@ pub fn save_project(
                     input.alias.trim(),
                     input.win_path.trim(),
                     input.wsl_path.trim(),
+                    input.git_remote.trim(),
+                    input.notes.trim(),
                 )
             }
             None => add_project_paths(
@@ -246,6 +265,8 @@ pub fn save_project(
                 input.alias.trim(),
                 input.win_path.trim(),
                 input.wsl_path.trim(),
+                input.git_remote.trim(),
+                input.notes.trim(),
             ),
         }
     }

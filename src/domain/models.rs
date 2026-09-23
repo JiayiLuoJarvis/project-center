@@ -21,6 +21,10 @@ pub struct Project {
     /// 引用的远程连接；非空即 SSH 项目（启动前再校验连接存在）。
     #[serde(rename = "connectionId", default)]
     pub connection_id: String,
+    #[serde(rename = "gitRemote", default)]
+    pub git_remote: String,
+    #[serde(default)]
+    pub notes: String,
 }
 
 impl Project {
@@ -38,6 +42,8 @@ impl Project {
             default_tool: String::new(),
             commands: Vec::new(),
             connection_id: String::new(),
+            git_remote: String::new(),
+            notes: String::new(),
         }
     }
 
@@ -58,6 +64,16 @@ impl Project {
 
     pub fn with_alias(mut self, alias: impl Into<String>) -> Self {
         self.alias = alias.into();
+        self
+    }
+
+    pub fn with_git_remote(mut self, git_remote: impl Into<String>) -> Self {
+        self.git_remote = git_remote.into();
+        self
+    }
+
+    pub fn with_notes(mut self, notes: impl Into<String>) -> Self {
+        self.notes = notes.into();
         self
     }
 
@@ -371,6 +387,10 @@ pub struct DeletedItem {
     pub commands: Vec<ProjectCommand>,
     #[serde(rename = "connectionId", default)]
     pub connection_id: String,
+    #[serde(rename = "gitRemote", default)]
+    pub git_remote: String,
+    #[serde(default)]
+    pub notes: String,
     /// 分组项的完整项目数组。
     #[serde(default)]
     pub projects: Vec<Project>,
@@ -400,6 +420,8 @@ impl DeletedItem {
             default_tool: project.default_tool.clone(),
             commands: project.commands.clone(),
             connection_id: project.connection_id.clone(),
+            git_remote: project.git_remote.clone(),
+            notes: project.notes.clone(),
             projects: Vec::new(),
             deleted_at,
         }
@@ -418,6 +440,8 @@ impl DeletedItem {
             default_tool: String::new(),
             commands: Vec::new(),
             connection_id: String::new(),
+            git_remote: String::new(),
+            notes: String::new(),
             projects: group.projects.clone(),
             deleted_at,
         }
@@ -808,6 +832,30 @@ mod tests {
 
         let out = serde_json::to_value(&data).unwrap();
         assert_eq!(out["groups"][0]["projects"][0]["defaultTool"], "");
+    }
+
+    #[test]
+    fn json_git_remote_and_notes_round_trip_and_missing() {
+        let json = r#"{"groups":[{"name":"G","projects":[{"name":"x","gitRemote":"https://example.com/x.git","notes":"备忘"}]}]}"#;
+        let data: ProjectData = serde_json::from_str(json).unwrap();
+        let p = &data.groups[0].projects[0];
+        assert_eq!(p.git_remote, "https://example.com/x.git");
+        assert_eq!(p.notes, "备忘");
+
+        let legacy = r#"{"groups":[{"name":"G","projects":[{"name":"x","path":"E:\\x"}]}]}"#;
+        let data: ProjectData = serde_json::from_str(legacy).unwrap();
+        let p = &data.groups[0].projects[0];
+        assert_eq!(p.git_remote, "");
+        assert_eq!(p.notes, "");
+
+        let out = serde_json::to_value(
+            Project::new("y", r"E:\y", "")
+                .with_git_remote("r")
+                .with_notes("n"),
+        )
+        .unwrap();
+        assert_eq!(out["gitRemote"], "r");
+        assert_eq!(out["notes"], "n");
     }
 
     #[test]

@@ -90,6 +90,10 @@ pub(crate) struct AddArgs {
     pub(crate) dir: Option<PathBuf>,
     #[arg(long = "wsl-path")]
     pub(crate) wsl_path: Option<String>,
+    #[arg(long = "git-remote", help = "git remote URL（空串清除）")]
+    pub(crate) git_remote: Option<String>,
+    #[arg(long, help = "项目备注（空串清除）")]
+    pub(crate) notes: Option<String>,
     #[arg(
         long = "ssh",
         help = "SSH 目标（user@host 或 user@host:端口）；设置后为 SSH 远程项目"
@@ -121,6 +125,10 @@ pub(crate) struct EditArgs {
     pub(crate) dir: Option<PathBuf>,
     #[arg(long = "wsl-path")]
     pub(crate) wsl_path: Option<String>,
+    #[arg(long = "git-remote", help = "更新 git remote URL；空串清除")]
+    pub(crate) git_remote: Option<String>,
+    #[arg(long, help = "更新项目备注；空串清除")]
+    pub(crate) notes: Option<String>,
     #[arg(long = "ssh", help = "更新 SSH 目标（user@host 或 user@host:端口）")]
     pub(crate) ssh: Option<String>,
     #[arg(long = "ssh-path", help = "更新远程 Linux 路径；空串清除")]

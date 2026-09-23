@@ -664,6 +664,22 @@ fn project_form_layout_is_named_fields() {
         fields[ProjectField::RemotePath as usize],
         FormField::Text { .. }
     ));
+    assert!(matches!(
+        &fields[ProjectField::GitRemote as usize],
+        FormField::Text { label, .. } if label == "git remote"
+    ));
+    assert!(matches!(
+        &fields[ProjectField::Notes as usize],
+        FormField::Text { label, .. } if label == "备注"
+    ));
+    assert_eq!(
+        ProjectField::GitRemote as usize,
+        ProjectField::RemotePath as usize + 1
+    );
+    assert_eq!(
+        ProjectField::Notes as usize,
+        ProjectField::GitRemote as usize + 1
+    );
 }
 
 #[test]

@@ -146,6 +146,8 @@ fn edit_project_updates_path_and_derived_wsl_path() {
         None,
         Some(r"F:\dev\new-app"),
         None,
+        None,
+        None,
     )
     .unwrap();
     let project = &data.groups[0].projects[0];
@@ -158,7 +160,18 @@ fn edit_project_can_clear_windows_path_keeping_wsl() {
     let mut data = data();
     let id = data.groups[0].projects[0].id.clone();
     data.groups[0].projects[0].wsl_path = "/mnt/e/dev/app".into();
-    edit_project_full(&mut data, "app", Some("Work"), None, None, Some(""), None).unwrap();
+    edit_project_full(
+        &mut data,
+        "app",
+        Some("Work"),
+        None,
+        None,
+        Some(""),
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     let project = &data.groups[0].projects[0];
     assert_eq!(project.id, id);
     assert_eq!(project.path, "");
@@ -177,6 +190,8 @@ fn edit_project_can_clear_both_paths() {
         None,
         Some(""),
         Some(""),
+        None,
+        None,
     )
     .unwrap();
     let project = &data.groups[0].projects[0];
@@ -195,11 +210,48 @@ fn edit_project_derived_wsl_keeps_manual_override() {
         None,
         Some(r"F:\dev\app"),
         Some("/custom/path"),
+        None,
+        None,
     )
     .unwrap();
     let project = &data.groups[0].projects[0];
     assert_eq!(project.path, r"F:\dev\app");
     assert_eq!(project.wsl_path, "/custom/path");
+}
+
+#[test]
+fn edit_project_updates_git_remote_and_notes() {
+    let mut data = data();
+    edit_project_full(
+        &mut data,
+        "app",
+        Some("Work"),
+        None,
+        None,
+        None,
+        None,
+        Some("https://example.com/app.git"),
+        Some("备注内容"),
+    )
+    .unwrap();
+    let project = &data.groups[0].projects[0];
+    assert_eq!(project.git_remote, "https://example.com/app.git");
+    assert_eq!(project.notes, "备注内容");
+    edit_project_full(
+        &mut data,
+        "app",
+        Some("Work"),
+        None,
+        None,
+        None,
+        None,
+        Some(""),
+        Some(""),
+    )
+    .unwrap();
+    let project = &data.groups[0].projects[0];
+    assert_eq!(project.git_remote, "");
+    assert_eq!(project.notes, "");
 }
 
 #[test]

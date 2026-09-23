@@ -121,7 +121,7 @@ impl App {
 
     /// 新增/编辑同一布局：本地路径 + 远程连接 + 远程路径。
     pub(crate) fn project_fields(data: &ProjectData, p: Option<&Project>) -> Vec<FormField> {
-        let (name, alias, path, wsl, cid, remote) = match p {
+        let (name, alias, path, wsl, cid, remote, git_remote, notes) = match p {
             Some(p) if p.is_ssh_project() => (
                 p.name.as_str(),
                 p.alias.as_str(),
@@ -129,6 +129,8 @@ impl App {
                 "",
                 p.connection_id.trim(),
                 p.path.as_str(),
+                p.git_remote.as_str(),
+                p.notes.as_str(),
             ),
             Some(p) => (
                 p.name.as_str(),
@@ -137,8 +139,10 @@ impl App {
                 p.wsl_path.as_str(),
                 "",
                 "",
+                p.git_remote.as_str(),
+                p.notes.as_str(),
             ),
-            None => ("", "", "", "", "", ""),
+            None => ("", "", "", "", "", "", "", ""),
         };
         let (display, value) = if cid.is_empty() {
             ("（未选择）".to_string(), String::new())
@@ -160,6 +164,8 @@ impl App {
             Self::text_field("WSL 路径", wsl),
             Self::select_field("远程连接", display, value),
             Self::text_field("远程路径", remote),
+            Self::text_field("git remote", git_remote),
+            Self::text_field("备注", notes),
         ]
     }
 
@@ -937,6 +943,8 @@ fn project_input(fields: &[FormField]) -> ProjectInput {
         wsl_path: App::field_value(fields, ProjectField::WslPath as usize),
         connection_id: App::field_value(fields, ProjectField::Connection as usize),
         remote_path: App::field_value(fields, ProjectField::RemotePath as usize),
+        git_remote: App::field_value(fields, ProjectField::GitRemote as usize),
+        notes: App::field_value(fields, ProjectField::Notes as usize),
     }
 }
 
