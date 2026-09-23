@@ -3,10 +3,12 @@
 mod config;
 mod error;
 mod legacy;
+mod migrate;
 mod secret;
 mod store;
 
 pub(crate) use config::*;
 pub(crate) use error::Error;
+pub(crate) use migrate::*;
 pub(crate) use secret::*;
 pub(crate) use store::*;

@@ -137,7 +137,7 @@ impl Store {
         };
         std::fs::create_dir_all(parent).map_err(|source| super::Error::SaveFailed { source })?;
         // 备份失败仅警告，不中断保存（延续「仅警告」哲学）。
-        if !backup_to(p) {
+        if !Self::backup_current_file(p) {
             eprintln!("警告：无法备份旧数据文件，已跳过备份。");
         }
         let json = serde_json::to_string_pretty(data).map_err(|e| super::Error::SaveFailed {
@@ -148,6 +148,37 @@ impl Store {
         let _ = std::fs::remove_file(p);
         std::fs::rename(&tmp, p).map_err(|source| super::Error::SaveFailed { source })?;
         Ok(())
+    }
+
+    /// 将当前非空 `projects.json` 轮转入 `backups/`（空/缺失跳过，返回 true）。
+    pub fn backup_current_file(p: &Path) -> bool {
+        backup_to(p)
+    }
+
+    /// 枚举备份目录内 `projects-*.json`，最新在前，并附带分组/项目计数。
+    pub fn list_backups_in(dir: &Path) -> Vec<super::BackupEntry> {
+        let mut names = backup_names(dir);
+        names.reverse();
+        names
+            .into_iter()
+            .map(|name| {
+                let path = dir.join(&name);
+                let (group_count, project_count) = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|t| serde_json::from_str::<ProjectData>(&t).ok())
+                    .map(|d| {
+                        let projects = d.groups.iter().map(|g| g.projects.len()).sum();
+                        (d.groups.len(), projects)
+                    })
+                    .unwrap_or((0, 0));
+                super::BackupEntry {
+                    name,
+                    path,
+                    group_count,
+                    project_count,
+                }
+            })
+            .collect()
     }
 }
 

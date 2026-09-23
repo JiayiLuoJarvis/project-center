@@ -130,6 +130,7 @@ impl App {
                     | RightPane::Connections
                     | RightPane::Trash
                     | RightPane::ConfigEnvs
+                    | RightPane::Backups
             ) {
                 self.right_pane = RightPane::Projects;
             }
@@ -196,6 +197,25 @@ impl App {
             },
             RightPane::ConfigTools { .. } => self.open_action_menu(data, config),
             RightPane::Commands { .. } => self.open_action_menu(data, config),
+            RightPane::Backups => {
+                let root = crate::persist::Store::file_path();
+                let backups = crate::persist::list_backups(
+                    root.parent().unwrap_or_else(|| std::path::Path::new(".")),
+                );
+                let Some(entry) = backups.get(self.right_sel) else {
+                    self.flash("暂无备份");
+                    return Outcome::Continue;
+                };
+                self.mode = Mode::Confirm {
+                    message: format!(
+                        "确认恢复备份「{}」（{} 组 / {} 项目）？将先备份当前数据。 y/N",
+                        entry.name, entry.group_count, entry.project_count
+                    ),
+                    kind: ConfirmKind::RestoreBackup {
+                        name: entry.name.clone(),
+                    },
+                };
+            }
         }
         Outcome::Continue
     }
@@ -310,6 +330,7 @@ impl App {
                 };
             }
             RightPane::ConfigEnvs => {}
+            RightPane::Backups => {}
         }
     }
 
@@ -365,6 +386,7 @@ impl App {
             }
             RightPane::Trash => self.flash("回收站不支持新增"),
             RightPane::ConfigEnvs => self.flash("请先进入环境工具列表"),
+            RightPane::Backups => self.flash("备份列表不支持新增"),
         }
     }
 
@@ -640,7 +662,7 @@ impl App {
                     selected: (selected + n - 1) % n,
                 };
             }
-            KeyCode::Enter => self.enter_settings_child(selected),
+            KeyCode::Enter => return self.enter_settings_child(selected),
             _ => {}
         }
         Outcome::Continue

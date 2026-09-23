@@ -206,6 +206,7 @@ impl App {
                 })
             }
             RightPane::ConfigEnvs => Some(self.right_sel),
+            RightPane::Backups => Some(self.right_sel),
         }
     }
 

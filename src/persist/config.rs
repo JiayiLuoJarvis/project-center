@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 pub const RESERVED_TERMINAL: &str = "终端";
 
 /// 单个可配置启动工具。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Tool {
     pub name: String,
     pub command: String,
@@ -20,10 +20,13 @@ impl Tool {
 }
 
 /// 各环境的启动工具列表；顶层缺失键视为空列表。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct AppConfig {
+    #[serde(default)]
     pub wsl: Vec<Tool>,
+    #[serde(default)]
     pub powershell: Vec<Tool>,
+    #[serde(default)]
     pub ide: Vec<Tool>,
     /// PIN 校验记录（PBKDF2 哈希，非 PIN 本身）；未设置时为 None 且不写盘。
     #[serde(default, skip_serializing_if = "Option::is_none")]

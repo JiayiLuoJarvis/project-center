@@ -96,6 +96,7 @@ fn render_top(frame: &mut Frame, area: Rect, app: &App, data: &ProjectData) {
         RightPane::Connections => format!("设置 · 远程连接 · {} 条", data.connections.len()),
         RightPane::Trash => format!("设置 · 回收站 · {} 项", data.trash.len()),
         RightPane::ConfigEnvs | RightPane::ConfigTools { .. } => "设置 · 启动工具".into(),
+        RightPane::Backups => "设置 · 数据备份".into(),
         RightPane::Commands { .. } => "自定义命令".into(),
     };
     let line = Line::from(vec![
@@ -169,6 +170,7 @@ fn render_right(frame: &mut Frame, area: Rect, app: &App, data: &ProjectData, co
             RightPane::Projects => "（暂无项目）",
             RightPane::ConfigTools { .. } => "（暂无工具）",
             RightPane::Commands { .. } => "（暂无命令）",
+            RightPane::Backups => "（暂无备份）",
             _ => "（空）",
         };
         frame.render_widget(
@@ -265,6 +267,17 @@ fn right_content<'a>(
                 .collect();
             (format!("命令 · {}", project.name), items)
         }
+        RightPane::Backups => {
+            let root = crate::persist::Store::file_path();
+            let backups = crate::persist::list_backups(
+                root.parent().unwrap_or_else(|| std::path::Path::new(".")),
+            );
+            let items = backups
+                .into_iter()
+                .map(|e| widgets::simple_item(e.summary_line()))
+                .collect();
+            ("BACKUPS".into(), items)
+        }
     }
 }
 
@@ -295,6 +308,7 @@ fn render_bottom(frame: &mut Frame, area: Rect, app: &App) {
         RightPane::ConfigEnvs | RightPane::ConfigTools { .. } => {
             "enter 进入  a 新增  e 编辑  d 删除  Esc 返回  ? 帮助  q 退出"
         }
+        RightPane::Backups => "enter 恢复选中备份  Esc 返回  ? 帮助  q 退出",
         RightPane::Commands { .. } => "enter/o 操作  a 新增  e 编辑  d 删除  Esc 返回  q 退出",
         RightPane::Projects => {
             "enter 打开  o 操作  a 新增  e 编辑  d 删除  m 移动  , 设置  / 过滤  ? 帮助  q 退出"

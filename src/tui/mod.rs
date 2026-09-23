@@ -111,6 +111,48 @@ fn loop_ui(
                 app.resume_after_file_pick(path, target);
                 *terminal = ratatui::try_init()?;
             }
+            Outcome::SaveMigrateFile => {
+                restore_terminal();
+                let path = rfd::FileDialog::new()
+                    .set_file_name("pcs-migrate.json")
+                    .add_filter("JSON", &["json"])
+                    .save_file()
+                    .map(|p| p.to_string_lossy().trim().to_string());
+                match path {
+                    Some(path) => {
+                        let pack = crate::persist::MigratePack::pack(data, config);
+                        match crate::persist::write_pack(std::path::Path::new(&path), &pack) {
+                            Ok(()) => app.flash(format!("已导出: {path}")),
+                            Err(e) => app.flash(e.to_string()),
+                        }
+                    }
+                    None => app.flash("已取消导出"),
+                }
+                *terminal = ratatui::try_init()?;
+            }
+            Outcome::PickMigrateFile => {
+                restore_terminal();
+                let path = rfd::FileDialog::new()
+                    .add_filter("JSON", &["json"])
+                    .add_filter("所有文件", &["*"])
+                    .pick_file()
+                    .map(|p| p.to_string_lossy().trim().to_string());
+                match path {
+                    Some(path) => match crate::persist::read_pack(std::path::Path::new(&path)) {
+                        Ok(pack) => {
+                            app.mode = Mode::Confirm {
+                                message:
+                                    "导入将替换当前项目与启动工具配置（不含秘密/PIN）。确认？ y/N"
+                                        .into(),
+                                kind: crate::tui::app::ConfirmKind::ImportMigrate { pack },
+                            };
+                        }
+                        Err(e) => app.flash(e.to_string()),
+                    },
+                    None => app.flash("已取消导入"),
+                }
+                *terminal = ratatui::try_init()?;
+            }
         }
     }
 }

@@ -21,13 +21,17 @@ pub enum RightPane {
     ConfigEnvs,
     ConfigTools { env: ConfigEnv },
     Commands { group: String, project_id: String },
+    Backups,
 }
 
 impl RightPane {
     /// Esc 返回表：设置子页回设置弹窗；工具列表回环境；命令回项目。
     pub fn parent(&self) -> Option<RightPane> {
         match self {
-            RightPane::Connections | RightPane::Trash | RightPane::ConfigEnvs => None,
+            RightPane::Connections
+            | RightPane::Trash
+            | RightPane::ConfigEnvs
+            | RightPane::Backups => None,
             RightPane::ConfigTools { .. } => Some(RightPane::ConfigEnvs),
             RightPane::Commands { .. } => Some(RightPane::Projects),
             RightPane::Projects => None,
@@ -37,7 +41,7 @@ impl RightPane {
     pub fn is_settings_child(&self) -> bool {
         matches!(
             self,
-            RightPane::Connections | RightPane::Trash | RightPane::ConfigEnvs
+            RightPane::Connections | RightPane::Trash | RightPane::ConfigEnvs | RightPane::Backups
         )
     }
 
@@ -46,12 +50,20 @@ impl RightPane {
             RightPane::Connections => 0,
             RightPane::Trash => 1,
             RightPane::ConfigEnvs | RightPane::ConfigTools { .. } => 2,
+            RightPane::Backups => 5,
             _ => 0,
         }
     }
 }
 
-pub const SETTINGS_ITEMS: [&str; 3] = ["远程连接", "回收站", "启动工具"];
+pub const SETTINGS_ITEMS: [&str; 6] = [
+    "远程连接",
+    "回收站",
+    "启动工具",
+    "导出配置",
+    "导入配置",
+    "数据备份",
+];
 pub const NEW_CONNECTION_LABEL: &str = "＋ 新建连接…";
 
 #[derive(Clone, Debug)]
@@ -127,6 +139,12 @@ pub enum ConfirmKind {
     },
     EmptyTrash,
     ResetConfig,
+    ImportMigrate {
+        pack: crate::persist::MigratePack,
+    },
+    RestoreBackup {
+        name: String,
+    },
 }
 
 /// 表单按钮动作；`target` 为要回填/清空的文本字段索引。
@@ -333,6 +351,10 @@ pub enum Outcome {
     PickFile {
         target: usize,
     },
+    /// 导出迁移包：离开备用屏后走 rfd save_file。
+    SaveMigrateFile,
+    /// 导入迁移包：离开备用屏后走 rfd pick_file。
+    PickMigrateFile,
 }
 
 pub struct App {

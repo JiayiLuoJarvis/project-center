@@ -3,7 +3,7 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::domain::models::{Project, ProjectData};
 use crate::launch::LaunchOption;
 use crate::persist as secret;
-use crate::persist::{AppConfig, ConfigEnv};
+use crate::persist::{AppConfig, ConfigEnv, Store};
 use crate::tui::actions;
 
 mod action_menu;
@@ -102,6 +102,7 @@ impl App {
                 | RightPane::Connections
                 | RightPane::Trash
                 | RightPane::ConfigEnvs
+                | RightPane::Backups
         ) {
             return;
         }
@@ -137,6 +138,12 @@ impl App {
                     .map(|p| self.filtered_command_indices(p).len())
                     .unwrap_or(0)
             }
+            RightPane::Backups => crate::persist::list_backups(
+                Store::file_path()
+                    .parent()
+                    .unwrap_or_else(|| std::path::Path::new(".")),
+            )
+            .len(),
         }
     }
 
@@ -184,15 +191,40 @@ impl App {
         self.mode = Mode::SettingsMenu { selected: 0 };
     }
 
-    pub(crate) fn enter_settings_child(&mut self, selected: usize) {
-        self.right_pane = match selected {
-            1 => RightPane::Trash,
-            2 => RightPane::ConfigEnvs,
-            _ => RightPane::Connections,
-        };
-        self.right_sel = 0;
-        self.focus = Focus::Projects;
-        self.mode = Mode::Browse;
+    pub(crate) fn enter_settings_child(&mut self, selected: usize) -> Outcome {
+        match selected {
+            0 => {
+                self.right_pane = RightPane::Connections;
+                self.right_sel = 0;
+                self.focus = Focus::Projects;
+                self.mode = Mode::Browse;
+                Outcome::Continue
+            }
+            1 => {
+                self.right_pane = RightPane::Trash;
+                self.right_sel = 0;
+                self.focus = Focus::Projects;
+                self.mode = Mode::Browse;
+                Outcome::Continue
+            }
+            2 => {
+                self.right_pane = RightPane::ConfigEnvs;
+                self.right_sel = 0;
+                self.focus = Focus::Projects;
+                self.mode = Mode::Browse;
+                Outcome::Continue
+            }
+            3 => Outcome::SaveMigrateFile,
+            4 => Outcome::PickMigrateFile,
+            5 => {
+                self.right_pane = RightPane::Backups;
+                self.right_sel = 0;
+                self.focus = Focus::Projects;
+                self.mode = Mode::Browse;
+                Outcome::Continue
+            }
+            _ => Outcome::Continue,
+        }
     }
 
     pub fn handle(

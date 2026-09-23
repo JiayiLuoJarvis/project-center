@@ -75,6 +75,30 @@ impl App {
                         Ok(msg) => self.flash(msg),
                         Err(e) => self.flash(e),
                     },
+                    ConfirmKind::ImportMigrate { pack } => {
+                        match crate::persist::import_replace(data, config, pack) {
+                            Ok(msg) => {
+                                self.flash(msg);
+                                self.left_sel = 0;
+                                self.right_pane = RightPane::Projects;
+                                self.sync_right_pane(data);
+                                self.clamp_selection(data, config);
+                            }
+                            Err(e) => self.flash(e.to_string()),
+                        }
+                    }
+                    ConfirmKind::RestoreBackup { name } => {
+                        match crate::persist::restore_backup(data, &name) {
+                            Ok(msg) => {
+                                self.flash(msg);
+                                self.left_sel = 0;
+                                self.right_pane = RightPane::Projects;
+                                self.sync_right_pane(data);
+                                self.clamp_selection(data, config);
+                            }
+                            Err(e) => self.flash(e.to_string()),
+                        }
+                    }
                     ConfirmKind::DeleteConnection { id, .. } => {
                         match actions::remove_connection(data, &id) {
                             Ok(msg) => {
