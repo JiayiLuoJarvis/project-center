@@ -20,11 +20,12 @@ fn set_text_windows(text: &str) -> Result<(), String> {
 
     use windows_sys::Win32::Foundation::{HANDLE, HGLOBAL};
     use windows_sys::Win32::System::DataExchange::{
-        CF_UNICODETEXT, EmptyClipboard, OpenClipboard, SetClipboardData,
+        EmptyClipboard, OpenClipboard, SetClipboardData,
     };
     use windows_sys::Win32::System::Memory::{
         GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalUnlock,
     };
+    use windows_sys::Win32::System::Ole::CF_UNICODETEXT;
 
     let mut wide: Vec<u16> = OsStr::new(text).encode_wide().collect();
     wide.push(0);
