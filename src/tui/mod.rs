@@ -142,7 +142,7 @@ fn loop_ui(
                         Ok(pack) => {
                             app.mode = Mode::Confirm {
                                 message:
-                                    "导入将替换当前项目与启动工具配置（不含秘密/PIN）。确认？ y/N"
+                                    "导入将替换项目与启动工具；本机 PIN 保留，密钥会先快照。确认？ y/N"
                                         .into(),
                                 kind: crate::tui::app::ConfirmKind::ImportMigrate { pack },
                             };

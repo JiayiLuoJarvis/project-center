@@ -32,13 +32,14 @@ impl MigratePack {
     }
 }
 
-/// 清空 DPAPI 密文字段、密钥 sidecar 引用与待删密钥列表。
+/// 清空 DPAPI 密文字段、密钥 sidecar / 来源路径引用与待删密钥列表。
 pub fn strip_project_secrets(data: &ProjectData) -> ProjectData {
     let mut out = data.clone();
     for conn in &mut out.connections {
         conn.ssh_password_enc.clear();
         conn.ssh_key_pass_enc.clear();
         conn.ssh_key_file.clear();
+        conn.ssh_key_path.clear();
     }
     out.pending_key_deletes.clear();
     out
@@ -73,18 +74,95 @@ pub fn read_pack(path: &Path) -> Result<MigratePack, super::Error> {
 }
 
 /// 替换内存中的数据与配置并落盘。
-/// `Store::save` 写入前会把当前非空 `projects.json` 轮转入 `backups/`。
+///
+/// - `Store::save` 写入前会把当前非空 `projects.json` 轮转入 `backups/`。
+/// - 启动工具列表取自包；**本机 PIN 保留**（包内无 PIN）。
+/// - 导入前把现有 `config.json` 与 `keys\` 快照进 `backups/`，避免孤儿清扫毁掉本机密钥。
 pub fn import_replace(
     data: &mut ProjectData,
     config: &mut AppConfig,
     pack: MigratePack,
 ) -> Result<String, super::Error> {
     let pack = pack.unpack();
+    let data_root = Store::file_path()
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| super::Error::Message("数据路径无效".into()))?;
+    let _ = snapshot_config_file(&data_root);
+    let keys_note = snapshot_keys_dir(&data_root)?;
+
+    let kept_pin = config.pin.clone();
     *data = pack.projects;
     *config = pack.config;
+    config.pin = kept_pin;
+
     Store::save(data)?;
     Config::save(config)?;
-    Ok("已导入配置（秘密与 PIN 未迁移）".into())
+
+    let mut msg = "已导入配置（本机 PIN 保留；秘密未迁移）".to_string();
+    if let Some(keys_dir) = keys_note {
+        msg.push_str(&format!("；原密钥已快照至 {}", keys_dir.display()));
+    }
+    Ok(msg)
+}
+
+fn migrate_stamp() -> String {
+    use crate::domain::models::{current_unix_ts, format_utc_compact};
+    format_utc_compact(current_unix_ts())
+}
+
+/// 把当前 `config.json` 复制到 `backups/config-<utc>.json`（缺失则跳过）。
+fn snapshot_config_file(data_root: &Path) -> Option<PathBuf> {
+    let src = Config::config_path_for_snapshot();
+    if !src.is_file() {
+        return None;
+    }
+    let backups = data_root.join("backups");
+    let _ = std::fs::create_dir_all(&backups);
+    let dest = unique_backup_path(&backups, &format!("config-{}", migrate_stamp()), ".json");
+    std::fs::copy(&src, &dest).ok()?;
+    Some(dest)
+}
+
+/// 将 `keys\` 内现有 sidecar 移到 `backups/keys-<utc>\`，再清空 `keys\`，
+/// 避免导入后剥离引用触发孤儿清扫时销毁本机密钥。
+fn snapshot_keys_dir(data_root: &Path) -> Result<Option<PathBuf>, super::Error> {
+    let keys = data_root.join("keys");
+    let Ok(entries) = std::fs::read_dir(&keys) else {
+        return Ok(None);
+    };
+    let files: Vec<_> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+        .collect();
+    if files.is_empty() {
+        return Ok(None);
+    }
+    let backups = data_root.join("backups");
+    std::fs::create_dir_all(&backups).map_err(|source| super::Error::SaveFailed { source })?;
+    let dest = unique_backup_path(&backups, &format!("keys-{}", migrate_stamp()), "");
+    std::fs::create_dir_all(&dest).map_err(|source| super::Error::SaveFailed { source })?;
+    for entry in files {
+        let name = entry.file_name();
+        let target = dest.join(&name);
+        // 优先 rename（同卷快）；失败则 copy + 删除源，保证 keys\ 清空。
+        if std::fs::rename(entry.path(), &target).is_err() {
+            std::fs::copy(entry.path(), &target)
+                .map_err(|source| super::Error::SaveFailed { source })?;
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    Ok(Some(dest))
+}
+
+fn unique_backup_path(dir: &Path, base: &str, extension: &str) -> PathBuf {
+    let mut name = format!("{base}{extension}");
+    let mut n = 2;
+    while dir.join(&name).exists() {
+        name = format!("{base}-{n}{extension}");
+        n += 1;
+    }
+    dir.join(name)
 }
 
 /// 备份条目：文件名 + 分组/项目计数摘要。
@@ -154,6 +232,7 @@ mod tests {
             ssh_password_enc: "DPAPI_BLOB".into(),
             ssh_key_pass_enc: "KEY_PASS_BLOB".into(),
             ssh_key_file: "keys/abc.bin".into(),
+            ssh_key_path: r"C:\Users\x\.ssh\id".into(),
             ..Default::default()
         };
         ProjectData {
@@ -198,6 +277,7 @@ mod tests {
         assert!(json.contains("gitRemote") || json.contains("https://example.com/app.git"));
         assert!(pack.projects.connections[0].ssh_password_enc.is_empty());
         assert!(pack.projects.connections[0].ssh_key_file.is_empty());
+        assert!(pack.projects.connections[0].ssh_key_path.is_empty());
         assert!(pack.projects.pending_key_deletes.is_empty());
         assert!(pack.config.pin.is_none());
         assert_eq!(pack.config.wsl[0].name, "x");
@@ -218,29 +298,78 @@ mod tests {
         let prior = sample_data();
         Store::save_to(&prior, &path).unwrap();
 
+        // 本机密钥：导入后应离开 keys\，落入 backups/keys-*
+        let keys = data_root.join("keys");
+        std::fs::create_dir_all(&keys).unwrap();
+        std::fs::write(keys.join("abc.bin"), b"enc").unwrap();
+
         let incoming = ProjectData {
             groups: vec![Group {
                 name: "Other".into(),
                 alias: String::new(),
                 projects: vec![Project::new("b", r"E:\b", "")],
             }],
+            connections: vec![Connection {
+                name: "box".into(),
+                host: "h".into(),
+                ssh_key_file: String::new(),
+                ..Default::default()
+            }],
             ..Default::default()
         };
-        let pack = MigratePack::pack(&incoming, &AppConfig::defaults());
+        let pack = MigratePack::pack(&incoming, &AppConfig {
+            wsl: vec![Tool::new("y", "y")],
+            powershell: vec![],
+            ide: vec![],
+            pin: None,
+        });
         let mut live = prior.clone();
         let mut cfg = sample_config();
         let cfg_path = dir.join("config.json");
+        std::fs::write(
+            &cfg_path,
+            serde_json::to_string(&cfg).unwrap(),
+        )
+        .unwrap();
         let _cfg_guard = test_env::ConfigPathGuard::redirect(&cfg_path);
-        import_replace(&mut live, &mut cfg, pack).unwrap();
+        let msg = import_replace(&mut live, &mut cfg, pack).unwrap();
 
         assert_eq!(live.groups[0].name, "Other");
-        assert!(cfg.pin.is_none());
+        assert!(cfg.pin.is_some(), "本机 PIN 必须保留");
+        assert_eq!(cfg.wsl[0].name, "y");
+        assert!(msg.contains("PIN"));
         let backups = list_backups(&data_root);
         assert!(!backups.is_empty(), "non-empty prior must produce a backup");
         let newest = &backups[0];
         let text = std::fs::read_to_string(&newest.path).unwrap();
         let snapped: ProjectData = serde_json::from_str(&text).unwrap();
         assert_eq!(snapped.groups[0].name, "Work");
+        // config 快照
+        let config_snaps: Vec<_> = std::fs::read_dir(data_root.join("backups"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("config-")
+            })
+            .collect();
+        assert_eq!(config_snaps.len(), 1);
+        // 密钥已移出 keys\
+        assert!(!keys.join("abc.bin").exists());
+        let key_snaps: Vec<_> = std::fs::read_dir(data_root.join("backups"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_type().map(|t| t.is_dir()).unwrap_or(false)
+                    && e.file_name().to_string_lossy().starts_with("keys-")
+            })
+            .collect();
+        assert_eq!(key_snaps.len(), 1);
+        assert!(key_snaps[0].path().join("abc.bin").is_file());
+        // 孤儿清扫不应再能删掉快照里的密钥
+        let _ = crate::persist::startup_maintenance_in(&data_root, &mut live, true);
+        assert!(key_snaps[0].path().join("abc.bin").is_file());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -285,18 +414,20 @@ mod tests {
         assert_eq!(list[0].project_count, 1);
         assert!(list[0].name.starts_with("projects-"));
 
-        // 再写一次，列表应 newest-first 且长度增长
         Store::save_to(&second, &path).unwrap();
         let list = list_backups(&data_root);
         assert!(list.len() >= 2);
         assert!(list[0].name >= list[1].name);
 
+        let before_restore = list_backups(&data_root).len();
         let mut live = second.clone();
         let name = list[0].name.clone();
         restore_backup(&mut live, &name).unwrap();
-        // 恢复后主文件内容等于该备份；且恢复前又多了一份当前快照
         let after = list_backups(&data_root);
-        assert!(after.len() > list.len() || after.len() == list.len());
+        assert!(
+            after.len() > before_restore,
+            "restore must rotate current projects into backups first"
+        );
         assert_eq!(
             live.groups[0].name,
             serde_json::from_str::<ProjectData>(

@@ -122,6 +122,11 @@ impl Config {
         Self::exe_dir().join("config.json")
     }
 
+    /// 供迁移导入快照当前配置文件路径。
+    pub(crate) fn config_path_for_snapshot() -> PathBuf {
+        Self::config_file()
+    }
+
     pub fn load() -> AppConfig {
         Self::load_from_path(&Self::config_file())
     }
